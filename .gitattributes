@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Declare files that will always have CRLF line endings on checkout.
+*.ASM text eol=crlf
+*.INC text eol=crlf
+*.BAT text eol=crlf
