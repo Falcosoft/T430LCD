@@ -2,6 +2,9 @@
 
 **LCD Brightness and Aspect Ratio Control for the Lenovo ThinkPad T430 under Real MS-DOS**
 
+<img width="1156" height="651" alt="doom_ar_corrected" src="https://github.com/user-attachments/assets/91dc5051-2819-43cd-a886-4baf82a154a3" />
+<img width="1156" height="651" alt="norton_ar_corrected" src="https://github.com/user-attachments/assets/07afd952-f327-4a82-98b7-af684d500083" />
+
 T430LCD is an open-source collection of utilities that restores modern LCD functionality when running real MS-DOS on a Lenovo ThinkPad T430 with Intel HD Graphics 4000 (Ivy Bridge).
 
 The project provides:
@@ -15,22 +18,19 @@ The project provides:
 ---
 
 > [!NOTE]
-> **Current release:** **v2.0**
+> **Current release:** **v2.1**
 >
 > **Implemented**
 >
 > - ✔ LCD brightness control
 > - ✔ CONFIG.SYS brightness driver
 > - ✔ Automatic aspect-ratio TSR
+> - ✔ DPMI-compatible aspect-ratio TSR for EMM386/JEMM386 systems
 > - ✔ Internal LCD support
 > - ✔ External VGA support
 > - ✔ External DVI support
 > - ✔ Reverse-engineering diagnostics
 > - ✔ Comprehensive documentation
->
-> **Planned**
->
-> - DPMI-compatible implementation for EMM386 systems
 
 ---
 
@@ -39,11 +39,12 @@ The project provides:
 ### Brightness
 
 - **BLCSET** – Interactive LCD brightness control
-- **BLCINIT** – Boot-time CONFIG.SYS device driver
+- **BLCINIT** – CONFIG.SYS device driver to set LCD brightness at boot time
 
 ### Aspect Ratio
 
-- **ASPECT** – TSR that automatically restores the correct 4:3 aspect ratio for legacy DOS graphics modes
+- **ASPECT** – TSR that automatically restores the correct 4:3 aspect ratio for legacy DOS text and graphics modes
+- **ASPECTD** – DPMI-compatible version of ASPECT for systems using EMM386/JEMM386 and a resident DPMI host such as HDPMI32
 
 ### Diagnostic Utilities
 
@@ -84,7 +85,6 @@ T430LCD/
 ├── TOOLS/      End-user utilities
 ├── DIAG/       Reverse-engineering diagnostics
 ├── INCL/       Shared include files
-├── BUILD/      Build scripts
 ├── BIN/        Optional compiled binaries
 └── docs/       Project documentation
 ```
@@ -99,7 +99,7 @@ T430LCD/
 - [Design Notes](docs/DesignNotes.md)
 - [Development History](docs/DevelopmentHistory.md)
 - [Contributing](docs/Contributing.md)
-- [Coding Conventions](CODING.md)
+- [Coding Conventions](CODING.MD)
 - [Hardware Tests](HARDWARE_TESTS.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 
@@ -111,19 +111,16 @@ Requirements:
 
 - Borland Turbo Assembler (TASM)
 - Borland TLINK
-- EXE2BIN (for `BLCINIT`)
 
 Build everything:
 
 ```dos
-CD BUILD
 BUILDALL
 ```
 
 Clean generated files:
 
 ```dos
-CD BUILD
 CLEANALL
 ```
 
@@ -149,10 +146,10 @@ Verified with:
 - PC DOS
 - FreeDOS
 
-Current limitation:
+Aspect-ratio TSR compatibility:
 
-- The current implementation is **not compatible with EMM386**.
-- DPMI support is planned for a future release.
+- **ASPECT** is intended for plain DOS without EMM386/JEMM386.
+- **ASPECTD** provides the same automatic aspect-ratio correction in DPMI environments and has been verified with JEMM386/HDPMI32.
 
 See [Known Limitations](KNOWN_LIMITATIONS.md).
 
