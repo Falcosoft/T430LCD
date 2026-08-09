@@ -2,6 +2,39 @@
 
 All notable changes to T430LCD are documented here.
 
+## [2.2.0] — 2026-08-09
+
+### ASPECT
+
+- Added `/D` to deactivate automatic aspect-ratio correction without unloading the real-mode TSR.
+- Added `/E` to re-enable correction and immediately reapply it when the current fitter state is compatible.
+- Preserved `/U` as the original true physical unload command.
+- On `/D`, the original fitter state is restored only when the current `PF_A_POS` and `PF_A_SIZE` exactly match ASPECT's own applied 4:3 state; otherwise the current fitter state is left untouched.
+- Added write/readback failure handling that disables further correction writes for safety.
+- Refactored the TSR into separate resident and transient regions so the installer, command parser, `/U` unloader, console output, messages, and installation-only helpers are discarded after installation.
+- Consolidated repeated protected-mode transition logic into a shared resident MMIO engine.
+- Reduced the tested resident memory footprint to approximately 3 KB while adding the new runtime controls.
+
+### BLCSETD
+
+- Added `BLCSETD.COM`, a DPMI-compatible version of BLCSET for memory-manager environments.
+- Replaced BLCSET's direct CR0 protected-mode transition with a 32-bit DPMI client and DPMI physical-memory mappings.
+- Mapped only the two 4 KiB MMIO pages required by the brightness path: `BAR0+48000h` and `BAR0+C8000h`.
+- Added DPMI selectors for the mapped CPU and PCH PWM pages and release of all selectors and mappings before program termination.
+- Preserved BLCSET's PCI BIOS discovery of the Intel graphics BAR0.
+- Preserved detection of the active PWM maximum from the upper 16 bits of `BAR0+C8254h`.
+- Preserved clamping of the requested duty to the detected maximum.
+- Preserved the upper 16 bits of `BAR0+48254h`; only the low duty word is modified.
+- Preserved immediate readback verification of the applied duty.
+- Confirmed operation on the ThinkPad T430 with JEMM386/HDPMI32.
+- Kept `BLCINIT.SYS` unchanged because it can run from CONFIG.SYS before EMM386/JEMM386 is loaded.
+
+### Project
+
+- Added DPMI-compatible interactive LCD brightness control for memory-manager environments.
+- Added logical disable/re-enable controls to the plain-DOS ASPECT TSR.
+- Updated the project documentation for ASPECT, BLCSETD, and release 2.2.
+
 ## [2.1.0] — 2026-08-09
 
 ### ASPECTD
