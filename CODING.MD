@@ -19,10 +19,15 @@ INCL
 BUILD
 BIN
 BLCSET.ASM
+BLCSETD.ASM
+ASPECT.ASM
+ASPECTD.ASM
 BUILD.BAT
 CLEAN.BAT
 MMIO.INC
 ```
+
+Do not rename source files referenced by DOS batch files to long filenames.
 
 Descriptive Markdown documentation filenames may use long filenames because they are intended primarily for GitHub and web-browser use.
 
@@ -32,8 +37,9 @@ Examples:
 ReverseEngineering.md
 DevelopmentHistory.md
 IntelRegisters.md
-KnownLimitations.md
 ```
+
+A subproject may also use an 8.3-compatible text documentation file such as `README.TXT`.
 
 ## 2. Line endings
 
@@ -129,8 +135,10 @@ Every subproject should contain:
 ```text
 BUILD.BAT
 CLEAN.BAT
-README.md
 ```
+
+and a local documentation file, normally `README.MD`/`README.md` or an
+8.3-compatible `README.TXT`.
 
 A typical `.COM` build is:
 
@@ -141,7 +149,8 @@ TLINK /t PROGRAM.OBJ
 
 Include paths must remain valid under DOS 8.3 naming rules.
 
-Root-level build scripts must reference only DOS-compatible directory names.
+Root-level build scripts must reference only DOS-compatible directory names and
+must include every released buildable subproject.
 
 ## 7. Shared include files
 
@@ -157,17 +166,20 @@ Hardware-sensitive logic should remain local to each utility unless a refactor h
 
 This includes:
 
-- protected-mode entry and exit
+- direct protected-mode entry and exit
+- DPMI mapping/setup logic
 - GDT construction
 - interrupt hooks
 - XMS handling
 - register write order
 - command parsing
-- TSR installation and removal
+- TSR installation and removal/control
 
-## 8. Protected-mode conventions
+## 8. MMIO access conventions
 
-The verified protected-mode layout is:
+### Direct plain-DOS backend
+
+The verified direct protected-mode layout is:
 
 ```text
 CS = 16-bit executable code selector
@@ -183,11 +195,25 @@ Rules:
 - Never write through the protected-mode code selector.
 - Disable interrupts and NMI during the transition.
 - Restore real-mode segments before DOS or BIOS calls.
-- Do not perform the direct CR0/LGDT transition under EMM386 or VM86.
+- Do not perform the direct CR0/LGDT transition under EMM386/JEMM386 or VM86.
+
+### DPMI backend
+
+DPMI variants such as BLCSETD and ASPECTD must:
+
+- detect a usable 32-bit DPMI host
+- map only the required physical MMIO range
+- configure selectors with the smallest practical limits
+- verify hardware writes by readback
+- release temporary mappings/selectors on nonresident exit paths
+- keep only resources that are genuinely required by a resident DPMI client
+- avoid assuming that VCPI is available
+
+ASPECTD's real-mode callback and resident DPMI resources must remain valid for the lifetime of the TSR.
 
 ## 9. Explicit MMIO instruction encodings
 
-TASM source files use exact byte encodings for 32-bit MMIO access from 16-bit protected-mode code.
+TASM source files use exact byte encodings for 32-bit MMIO access from 16-bit protected-mode code where needed.
 
 Read DWORD from `DS:[ESI]`:
 
@@ -207,13 +233,13 @@ Use the shared MMIO macros where available.
 
 Change the smallest possible verified register set.
 
-For brightness:
+For brightness, both direct and DPMI variants follow:
 
 ```text
 Write the active PWM duty register only.
 ```
 
-For aspect-ratio correction:
+For aspect-ratio correction, both ASPECT and ASPECTD follow:
 
 ```text
 Write PF_A_POS first.
@@ -263,7 +289,8 @@ Internal panel resolution:
 External connection type:
 DOS version:
 HIMEM version:
-EMM386 loaded:
+EMM386/JEMM386 configuration:
+DPMI host and version:
 Utility:
 Command:
 Exact output:
@@ -308,7 +335,7 @@ Preferred categories:
 - hardware-support change
 - refactor with no intended behavior change
 
-A refactor that touches protected-mode or MMIO code must be compiled and regression-tested on the T430 before release.
+A refactor that touches protected-mode, DPMI, interrupt, or MMIO code must be compiled and regression-tested on the T430 before release.
 
 ## 15. Attribution
 
@@ -323,15 +350,19 @@ Contributions should preserve this transparent development history.
 
 Before publishing a release:
 
-- all build-time paths are DOS 8.3 compatible
+- all build-time paths and filenames are DOS 8.3 compatible
 - all text files use CRLF line endings
 - all `.COM` projects use `TLINK /t`
 - batch files avoid `2>NUL`
+- `BUILDALL.BAT` includes BLCSET, BLCSETD, BLCINIT, ASPECT, ASPECTD, and all released diagnostics
 - `BUILDALL.BAT` succeeds on real DOS
 - `CLEANALL.BAT` succeeds on real DOS
-- BLCSET is tested
-- BLCINIT is tested
-- ASPECT install and `/U` unload are tested
+- BLCSET is tested in its intended plain-DOS configuration
+- BLCSETD is tested with the intended DPMI/memory-manager configuration
+- BLCINIT is tested during CONFIG.SYS processing
+- ASPECT install, `/D`, `/E`, and `/U` are tested
+- ASPECTD install/state, `/D` (or `/U` logical disable), and `/E` are tested
+- JEMM386/HDPMI32 behavior is regression-tested for the DPMI variants
 - internal LCD behavior is verified
 - external VGA behavior is verified
 - external DVI behavior is verified

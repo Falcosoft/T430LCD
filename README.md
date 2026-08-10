@@ -106,7 +106,6 @@ T430LCD/
 - [Contributing](docs/Contributing.md)
 - [Coding Conventions](CODING.MD)
 - [Hardware Tests](HARDWARE_TESTS.md)
-- [Known Limitations](KNOWN_LIMITATIONS.md)
 
 ---
 
@@ -161,8 +160,6 @@ Aspect-ratio TSR compatibility:
 
 - **ASPECT** is intended for plain DOS without EMM386/JEMM386. `/D` deactivates correction while leaving the TSR resident, `/E` re-enables it, and `/U` performs the original physical unload.
 - **ASPECTD** provides the same automatic aspect-ratio correction in DPMI environments and has been verified with JEMM386/HDPMI32.
-
-See [Known Limitations](KNOWN_LIMITATIONS.md).
 
 ---
 

@@ -39,7 +39,7 @@ Graphics BAR0: F0000000h
 Intel OpRegion ASLS: DAF55018h
 ```
 
-Compatibility with other systems is not assumed.
+Compatibility with other systems is not assumed from register layout alone.
 
 ## 3. Initial firmware investigation
 
@@ -88,7 +88,7 @@ F0000000h
 
 Ordinary real-mode addressing cannot directly access this region.
 
-The working solution used a temporary protected-mode transition:
+The first working solution used a temporary protected-mode transition:
 
 1. enable A20 through XMS
 2. build a runtime GDT
@@ -98,6 +98,8 @@ The working solution used a temporary protected-mode transition:
 6. return to real mode
 7. restore NMI and interrupt state
 8. disable A20 when appropriate
+
+This became the direct plain-DOS backend later used by BLCSET and ASPECT.
 
 ### 4.2 Explicit instruction encoding
 
@@ -234,7 +236,7 @@ Its important properties were:
 - range clamping
 - no hard-coded brightness maximum
 - immediate write verification
-- reuse of the safe protected-mode framework
+- reuse of the safe direct protected-mode framework
 
 ### 5.5 BLCINIT
 
@@ -575,7 +577,7 @@ If the requested mode's X and Y resolution match the detected output dimensions,
 
 This preserves native 1600×900 VESA output.
 
-### 12.4 Safe unload
+### 12.4 Safe physical unload
 
 `ASPECT /U`:
 
@@ -589,11 +591,31 @@ This preserves native 1600×900 VESA output.
 
 If another TSR was installed after ASPECT and owns either interrupt, unload is refused.
 
-## 13. EMM386 experiments
+### 12.5 Runtime deactivate/re-enable and resident refactor
 
-### 13.1 Why the current method fails
+ASPECT was later extended with:
 
-Under EMM386, DOS code runs in virtual-8086 mode.
+- `/D` logical deactivation while keeping the TSR resident
+- `/E` re-enable/reapply
+- preservation of `/U` as physical unload
+
+On `/D`, ASPECT restores the installation fitter state only when the current
+`PF_A_POS` and `PF_A_SIZE` exactly match its own applied 4:3 state. Otherwise the
+current output state is left untouched.
+
+On `/E`, future correction is enabled immediately. If the current fitter size
+matches the installation-time fixed raster, the 4:3 window is applied immediately;
+otherwise ASPECT waits for a later compatible BIOS mode set.
+
+The source was also split into resident and transient regions and the repeated
+protected-mode transition logic was consolidated. The resulting tested resident
+footprint is approximately 3 KB.
+
+## 13. EMM386 and DPMI development
+
+### 13.1 Why the direct method fails under EMM386
+
+Under EMM386/JEMM386, DOS code runs in virtual-8086 mode.
 
 Instructions such as:
 
@@ -604,7 +626,7 @@ MOV CR0
 
 are privileged and cannot be used directly.
 
-The current ASPECT handler therefore detects VM86 and skips the operation safely.
+The plain-DOS ASPECT handler therefore detects VM86 and skips the direct operation safely. This limitation applies to the direct backend, not to ASPECTD.
 
 ### 13.2 XMS move experiment
 
@@ -620,21 +642,55 @@ The reason was conceptual:
 
 Therefore XMS move cannot bridge to the Intel graphics aperture.
 
-### 13.3 DPMI future plan
+### 13.3 Successful DPMI development: ASPECTD
 
-DPMI is preferred over VCPI because compatibility with VSBHDA is an explicit project goal.
+DPMI was preferred over a VCPI-only design because compatibility with VSBHDA was an explicit project goal.
 
-The planned staged development is:
+The staged development that had originally been planned was subsequently completed:
 
 1. map the graphics MMIO page through DPMI physical-address mapping
 2. verify read-only fitter access
-3. verify controlled position/size writes
-4. allocate a real-mode callback
-5. connect the callback to the real-mode INT 10h hook
-6. keep the DPMI service resident
-7. test under EMM386 and with VSBHDA
+3. verify controlled position/size writes and restoration
+4. allocate and verify a DPMI real-mode callback
+5. connect the callback to a real-mode INT 10h hook
+6. perform automatic post-BIOS aspect correction
+7. keep the DPMI client resident
+8. test with JEMM386/HDPMI32 and protected-mode DOS software
 
-This work remains future development.
+An early callback version faulted because a 32-bit DPMI client returned from the callback with a 16-bit `IRET`. The verified fix used a 32-bit `IRETD` encoding.
+
+The final `ASPECTD`:
+
+- maps the fitter MMIO page through DPMI
+- uses a protected-mode callback for fitter access
+- hooks real-mode `INT 10h`
+- preserves the same conservative fixed-raster and native-VESA rules as ASPECT
+- writes only `PF_A_POS` and `PF_A_SIZE`
+- verifies every fitter write
+- safety-locks further writes after a verification failure
+
+ASPECTD was verified with JEMM386/HDPMI32 and protected-mode games including Duke Nukem 3D and DOOM.
+
+HDPMI32 did not provide a documented safe physical-unload mechanism for this resident-client design. A raw-switch unload experiment was unsafe and was discarded. Therefore ASPECTD `/U` and `/D` are logical deactivation commands, while `/E` re-enables correction.
+
+### 13.4 DPMI brightness: BLCSETD
+
+The same DPMI mapping approach was then applied to interactive brightness control.
+
+`BLCSETD`:
+
+- discovers BAR0 through PCI BIOS
+- maps only `BAR0+48000h` and `BAR0+C8000h`
+- uses DPMI selectors for those two 4 KiB pages
+- preserves BLCSET's maximum detection and duty clamping
+- writes only `BAR0+48254h`
+- preserves its upper 16 bits
+- verifies the low 16-bit duty by immediate readback
+- releases both selectors and mappings before termination
+
+BLCSETD was verified with JEMM386/HDPMI32 on the T430.
+
+BLCINIT required no DPMI counterpart because it can perform its one-time operation during CONFIG.SYS processing before the memory manager is loaded.
 
 ## 14. Engineering lessons
 
@@ -686,6 +742,12 @@ Instead it observes:
 
 This produced a safer and more portable decision rule.
 
+### 14.6 Separate hardware policy from access backend
+
+BLCSET/BLCSETD and ASPECT/ASPECTD demonstrate that the same conservative register policy can be retained while changing how MMIO is reached.
+
+The direct backend and DPMI backend differ in CPU/memory-manager mechanics, not in which hardware registers are considered safe to modify.
+
 ## 15. Result
 
 The project produced:
@@ -693,8 +755,10 @@ The project produced:
 ### End-user tools
 
 - `BLCSET`
+- `BLCSETD`
 - `BLCINIT`
 - `ASPECT`
+- `ASPECTD`
 
 ### Diagnostics
 
@@ -706,12 +770,15 @@ The project produced:
 ### Verified achievements
 
 - direct T430 LCD brightness control under real MS-DOS
+- DPMI-compatible interactive brightness control with JEMM386/HDPMI32
 - boot-time brightness initialization
 - automatic internal-LCD 4:3 correction
+- DPMI-compatible resident aspect-ratio correction with JEMM386/HDPMI32
 - safe handling of external analog VGA
 - safe handling of external digital/DVI
-- protected-mode-game compatibility in tested plain-DOS cases
-- safe TSR unload
+- protected-mode-game compatibility in tested plain-DOS and DPMI configurations
+- safe physical unload for plain-DOS ASPECT
+- logical disable/re-enable controls for ASPECT and ASPECTD
 - documented Intel Ivy Bridge MMIO behavior
 
-The project remains intentionally scoped to the Lenovo ThinkPad T430 until additional systems are tested.
+The ThinkPad T430 remains the primary fully documented validation platform. Additional Ivy Bridge/Intel HD Graphics 4000 laptops have also been reported working, but their exact models and detailed results are not yet recorded in this repository.

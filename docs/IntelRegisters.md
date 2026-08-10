@@ -154,7 +154,7 @@ medium:  000001E7h
 maximum: 00001155h
 ```
 
-This is the primary brightness register written by BLCSET and BLCINIT.
+This is the primary brightness register written by BLCSET, BLCSETD, and BLCINIT.
 
 ### PCH backlight control 2
 
@@ -319,7 +319,7 @@ PF_A_POS  = 00000000h
 PF_A_SIZE = 06400384h
 ```
 
-ASPECT 4:3 state:
+ASPECT/ASPECTD 4:3 state:
 
 ```text
 PF_A_POS  = 00C80000h
@@ -442,7 +442,7 @@ decodes to:
 
 ## 8. Register-write policy
 
-### Registers written by BLCSET/BLCINIT
+### Registers written by BLCSET/BLCSETD/BLCINIT
 
 ```text
 BAR0+48254h
@@ -450,7 +450,7 @@ BAR0+48254h
 
 The write preserves unrelated upper bits and is verified immediately.
 
-### Registers written by ASPECT
+### Registers written by ASPECT/ASPECTD
 
 ```text
 BAR0+68070h
@@ -467,11 +467,13 @@ BAR0+68084h  PF_A_VSCALE
 BAR0+68090h  PF_A_HSCALE
 ```
 
-The final ASPECT implementation also does not write pipe timing registers.
+Neither ASPECT nor ASPECTD writes pipe timing registers.
 
-## 9. Protected-mode access conventions
+## 9. MMIO access conventions
 
-The safe protected-mode design uses:
+### Direct plain-DOS backend
+
+The safe direct protected-mode design used by tools such as BLCSET and ASPECT uses:
 
 ```text
 CS = 16-bit executable code selector
@@ -488,7 +490,22 @@ Rules:
 - disable interrupts and NMI during the transition
 - restore real-mode segments before DOS or BIOS calls
 - use XMS for A20 control
-- do not execute the direct transition under EMM386/VM86
+- do not execute the direct transition under EMM386/JEMM386 VM86
+
+### DPMI backend
+
+BLCSETD and ASPECTD use DPMI instead of direct CR0/LGDT switching.
+
+The verified DPMI design uses:
+
+- a resident 32-bit DPMI host such as HDPMI32
+- DPMI function `0800h` physical-address mapping
+- DPMI selectors configured for the mapped MMIO
+- a DPMI real-mode callback for the resident ASPECTD INT 10h path
+- release of temporary BLCSETD selectors/mappings before termination
+
+ASPECTD keeps its mapped fitter page, selector, callback, and DPMI client resident
+for later BIOS mode changes.
 
 ## 10. Explicit MMIO instruction encodings
 
@@ -504,7 +521,8 @@ db 067h,066h,08Bh,006h
 db 067h,066h,089h,006h
 ```
 
-These encodings avoid TASM ambiguity in 16-bit source files.
+These encodings are used by the 16-bit direct protected-mode sources where needed.
+DPMI clients can access mapped MMIO through their DPMI selectors.
 
 ## 11. Conservative aspect-ratio rules
 
@@ -548,9 +566,10 @@ This prevents corrupting external mode-timed outputs.
 
 ## 12. Known limits
 
-- Register layout is verified only on the tested T430.
-- Fitter A was the active fitter on all tested paths.
+- The detailed register layout and values in this document are based primarily on the tested T430.
+- Fitter A was the active fitter on all primary T430 test paths.
 - Other firmware may select fitter B or C.
-- EMM386 is not supported by the direct protected-mode implementation.
-- DPMI physical mapping and callback support remain future work.
+- The direct CR0/LGDT backend is not usable from EMM386/JEMM386 virtual-8086 mode.
+- ASPECTD and BLCSETD provide the DPMI path and have been verified with JEMM386/HDPMI32 on the T430.
+- Other DPMI hosts, memory-manager combinations, and Ivy Bridge systems require independent testing.
 - The register reference documents measured behavior, not a universal Intel programming contract.
