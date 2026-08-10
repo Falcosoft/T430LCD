@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-T430LCD addresses two practical Lenovo ThinkPad T430 problems under real MS-DOS:
+T430LCD addresses two practical Lenovo ThinkPad T430 problems under real DOS on physical hardware:
 
 1. restoring a preferred LCD brightness automatically at boot
 2. preventing legacy 4:3 DOS modes from being stretched across the internal widescreen LCD
@@ -34,13 +34,13 @@ Additional Ivy Bridge/Intel HD Graphics 4000 laptops have also been reported wor
 
 Required for the direct plain-DOS tools:
 
-- real MS-DOS
+- real DOS on physical hardware
 - HIMEM/XMS
 - no active EMM386/JEMM386 virtual-8086 environment while running `BLCSET` or `ASPECT`
 
 Required for the DPMI tools:
 
-- real MS-DOS
+- real DOS on physical hardware
 - a 32-bit DPMI host
 - the verified memory-manager configuration uses JEMM386/JEMMEX with resident HDPMI32
 
