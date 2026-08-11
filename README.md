@@ -2,7 +2,7 @@
 
 **LCD Brightness and Aspect Ratio Control for the Lenovo ThinkPad T430 under Real MS-DOS**
 
-The tools can also work with other Ivy Bridge/Intel HD Graphics 4000 laptops but so far only a few models have been confirmed.
+The tools can also work with other Ivy Bridge/Intel HD Graphics 4000 laptops. The complete utility set has been confirmed working on a Lenovo IdeaPad Yoga 13 with a Core i5-3427U and an HP EliteBook Folio 9470m with a Core i5-3427U.
 
 <img width="1156" height="651" alt="doom_ar_corrected" src="https://github.com/user-attachments/assets/91dc5051-2819-43cd-a886-4baf82a154a3" />
 <img width="1156" height="651" alt="norton_ar_corrected" src="https://github.com/user-attachments/assets/07afd952-f327-4a82-98b7-af684d500083" />
@@ -72,13 +72,15 @@ The current release has been verified on:
 
 | Hardware | Status |
 |----------|--------|
-| Lenovo ThinkPad T430 | ✅ Verified |
+| Lenovo ThinkPad T430 | ✅ Fully verified primary platform |
+| Lenovo IdeaPad Yoga 13, Core i5-3427U / Intel HD 4000 | ✅ All utilities confirmed working |
+| HP EliteBook Folio 9470m, Core i5-3427U / Intel HD 4000 | ✅ All utilities confirmed working |
 | Intel HD Graphics 4000 (Ivy Bridge) | ✅ Verified |
-| Internal 1600×900 LCD | ✅ Verified |
-| External VGA monitor | ✅ Verified |
-| External DVI monitor | ✅ Verified |
+| Internal 1600×900 LCD on T430 | ✅ Verified |
+| External VGA monitor on T430 | ✅ Verified |
+| External DVI monitor on T430 | ✅ Verified |
 
-At present, **only the Lenovo ThinkPad T430 is officially supported.**
+The **ThinkPad T430 remains the primary fully documented and officially supported platform**. The IdeaPad Yoga 13 and EliteBook Folio 9470m are community-confirmed compatible with all T430LCD utilities; their exact internal panel resolutions and detailed output-path logs are not yet documented.
 
 ---
 
