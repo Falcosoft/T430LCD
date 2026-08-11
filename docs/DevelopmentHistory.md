@@ -80,15 +80,17 @@ through DPMI and releases all DPMI resources before terminating.
 Subsequent community testing confirmed the complete T430LCD utility set on two
 additional Ivy Bridge/Intel HD Graphics 4000 laptops:
 
-- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U
-- HP EliteBook Folio 9470m with Intel Core i5-3427U
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U and a 1600×900 internal LCD
+- HP EliteBook Folio 9470m with Intel Core i5-3427U and a 1366×768 internal LCD
 
-The exact internal panel resolutions and detailed output-path logs for those two
-systems are not yet documented.
+The Yoga 13 uses the same ASPECT geometry as the T430: a centered 1200×900 4:3
+window at X=200, Y=0. On the 9470m, user feedback and screenshots confirm a
+centered 1024×768 window at X=171, Y=0, demonstrating correct dynamic geometry on
+a second native panel resolution.
 
 ## Future
 
-- collect detailed panel resolutions/configurations and output-path logs for the additional verified systems
+- collect detailed output-path/PFSNAP logs for the additional verified systems
 - additional Ivy Bridge hardware validation
 - community testing and contributions
 - additional diagnostics where new hardware behavior differs
