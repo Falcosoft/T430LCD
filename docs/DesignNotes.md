@@ -45,6 +45,15 @@ After each watched mode change:
 
 This avoids disturbing external outputs that already generate correct timings.
 
+Confirmed internal-panel geometry now includes two native sizes:
+
+- 1600×900 on the ThinkPad T430 and IdeaPad Yoga 13 → 1200×900 at X=200, Y=0
+- 1366×768 on the HP EliteBook Folio 9470m → 1024×768 at X=171, Y=0
+
+The 9470m result is confirmed by user feedback and screenshots and independently
+validates the dynamic geometry calculation on a panel size different from the
+1600×900 development platform.
+
 The real-mode ASPECT also supports runtime logical control:
 
 - `/D` deactivates correction while keeping the TSR resident.
@@ -105,18 +114,22 @@ The same write policy is used by ASPECT and ASPECTD.
 
 Community testing has confirmed the complete T430LCD utility set on:
 
-- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000
-- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1600×900 internal LCD
+- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1366×768 internal LCD
+
+The Yoga 13 therefore uses the same 1200×900, X=200 ASPECT geometry as the T430.
+The 9470m produces a 1024×768, X=171 corrected window; this result is confirmed
+by user feedback and screenshots.
 
 These confirmations support the project's measured-behavior approach beyond the
-primary T430 platform, but the exact internal panel resolutions and detailed
-output-path/PFSNAP logs for those systems are not yet documented.
+primary T430 platform. Detailed output-path/PFSNAP logs for the two community-tested
+systems are not yet documented.
 
 ## Current direction
 
 Current follow-up work is focused on:
 
 - additional Ivy Bridge/Intel HD Graphics 4000 hardware validation
-- documenting panel resolutions and detailed configurations for community-verified systems
+- collecting detailed output-path/PFSNAP logs for community-verified systems
 - additional output-path diagnostics where new hardware differs
 - continued regression testing of both the direct and DPMI backends
