@@ -41,12 +41,12 @@ Intel OpRegion ASLS: DAF55018h
 
 The complete utility set has subsequently also been confirmed working on:
 
-- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000
-- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1600×900 internal LCD
+- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1366×768 internal LCD
 
-These are community confirmations rather than the primary reverse-engineering
-platform. Their exact internal panel resolutions and detailed register/output-path
-logs are not yet recorded.
+These are community confirmations rather than the primary reverse-engineering platform. The Yoga 13 uses the same 1600×900 panel geometry as the T430. On the 9470m, user feedback and screenshots confirm that ASPECT produces a centered 1024×768 4:3 window at X=171, Y=0 from the 1366×768 internal panel.
+
+Detailed register/output-path/PFSNAP logs for those two systems are not yet recorded.
 
 Compatibility with other systems is not assumed from register layout alone.
 
@@ -564,6 +564,14 @@ For 1600×900:
 1200×900 at 200,0
 ```
 
+For the later community-confirmed 1366×768 EliteBook Folio 9470m:
+
+```text
+1024×768 at 171,0
+```
+
+That result is confirmed by user feedback and screenshots and demonstrates that the geometry calculation is not hard-coded for 1600×900.
+
 ### 12.2 Per-mode conservative check
 
 After each watched BIOS mode change, ASPECT reads the current fitter destination again.
@@ -584,7 +592,7 @@ For `AX=4F02h`, ASPECT queries the VBE mode information using `AX=4F01h`.
 
 If the requested mode's X and Y resolution match the detected output dimensions, ASPECT does not apply pillarboxing.
 
-This preserves native 1600×900 VESA output.
+This preserves native 1600×900 VESA output on the primary T430 test platform.
 
 ### 12.4 Safe physical unload
 
@@ -789,5 +797,7 @@ The project produced:
 - safe physical unload for plain-DOS ASPECT
 - logical disable/re-enable controls for ASPECT and ASPECTD
 - documented Intel Ivy Bridge MMIO behavior
+- community confirmation on two additional Ivy Bridge/Intel HD Graphics 4000 laptops
+- correct dynamic ASPECT geometry confirmed on both 1600×900 and 1366×768 internal panels
 
-The ThinkPad T430 remains the primary fully documented validation platform. The complete utility set has also been confirmed working on a Lenovo IdeaPad Yoga 13 with a Core i5-3427U and an HP EliteBook Folio 9470m with a Core i5-3427U, both using Intel HD Graphics 4000. Their exact internal panel resolutions and detailed output-path/PFSNAP results are not yet recorded.
+The ThinkPad T430 remains the primary fully documented validation platform. The complete utility set has also been confirmed working on a Lenovo IdeaPad Yoga 13 with a Core i5-3427U and 1600×900 internal LCD, and an HP EliteBook Folio 9470m with a Core i5-3427U and 1366×768 internal LCD, both using Intel HD Graphics 4000. The Yoga 13 uses the same 1200×900, X=200 correction as the T430; the 9470m is confirmed by user feedback and screenshots to use a 1024×768, X=171 correction. Detailed output-path/PFSNAP results for those two systems are not yet recorded.
