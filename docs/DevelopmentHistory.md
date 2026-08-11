@@ -77,9 +77,18 @@ adding the new controls.
 control. It preserves BLCSET's register semantics but maps the required PWM pages
 through DPMI and releases all DPMI resources before terminating.
 
+Subsequent community testing confirmed the complete T430LCD utility set on two
+additional Ivy Bridge/Intel HD Graphics 4000 laptops:
+
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U
+- HP EliteBook Folio 9470m with Intel Core i5-3427U
+
+The exact internal panel resolutions and detailed output-path logs for those two
+systems are not yet documented.
+
 ## Future
 
-- document exact models/configurations from additional successful Ivy Bridge/HD 4000 tests
+- collect detailed panel resolutions/configurations and output-path logs for the additional verified systems
 - additional Ivy Bridge hardware validation
 - community testing and contributions
 - additional diagnostics where new hardware behavior differs
