@@ -101,11 +101,22 @@ only PF_A_POS followed by PF_A_SIZE.
 
 The same write policy is used by ASPECT and ASPECTD.
 
+## Additional verified hardware
+
+Community testing has confirmed the complete T430LCD utility set on:
+
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000
+- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000
+
+These confirmations support the project's measured-behavior approach beyond the
+primary T430 platform, but the exact internal panel resolutions and detailed
+output-path/PFSNAP logs for those systems are not yet documented.
+
 ## Current direction
 
 Current follow-up work is focused on:
 
 - additional Ivy Bridge/Intel HD Graphics 4000 hardware validation
-- documenting exact models and configurations reported by community testers
+- documenting panel resolutions and detailed configurations for community-verified systems
 - additional output-path diagnostics where new hardware differs
 - continued regression testing of both the direct and DPMI backends
