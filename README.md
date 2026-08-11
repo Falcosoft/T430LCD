@@ -70,17 +70,24 @@ Aspect ratio:
 
 The current release has been verified on:
 
-| Hardware | Status |
-|----------|--------|
-| Lenovo ThinkPad T430 | ✅ Fully verified primary platform |
-| Lenovo IdeaPad Yoga 13, Core i5-3427U / Intel HD 4000 | ✅ All utilities confirmed working |
-| HP EliteBook Folio 9470m, Core i5-3427U / Intel HD 4000 | ✅ All utilities confirmed working |
-| Intel HD Graphics 4000 (Ivy Bridge) | ✅ Verified |
-| Internal 1600×900 LCD on T430 | ✅ Verified |
-| External VGA monitor on T430 | ✅ Verified |
-| External DVI monitor on T430 | ✅ Verified |
+| Hardware | Internal LCD | Status |
+|----------|--------------|--------|
+| Lenovo ThinkPad T430 | 1600×900 | ✅ Fully verified primary platform |
+| Lenovo IdeaPad Yoga 13, Core i5-3427U / Intel HD 4000 | 1600×900 | ✅ All utilities confirmed working |
+| HP EliteBook Folio 9470m, Core i5-3427U / Intel HD 4000 | 1366×768 | ✅ All utilities confirmed working |
+| Intel HD Graphics 4000 (Ivy Bridge) | — | ✅ Verified on the systems above |
+| External VGA monitor on T430 | — | ✅ Verified |
+| External DVI monitor on T430 | — | ✅ Verified |
 
-The **ThinkPad T430 remains the primary fully documented and officially supported platform**. The IdeaPad Yoga 13 and EliteBook Folio 9470m are community-confirmed compatible with all T430LCD utilities; their exact internal panel resolutions and detailed output-path logs are not yet documented.
+The **ThinkPad T430 remains the primary fully documented and officially supported platform**. The IdeaPad Yoga 13 and EliteBook Folio 9470m are community-confirmed compatible with all T430LCD utilities.
+
+Confirmed ASPECT internal-LCD geometry:
+
+- ThinkPad T430, 1600×900 → **1200×900**, centered at **X=200, Y=0**
+- IdeaPad Yoga 13, 1600×900 → **1200×900**, centered at **X=200, Y=0**
+- EliteBook Folio 9470m, 1366×768 → **1024×768**, centered at **X=171, Y=0**; user feedback and screenshots confirm the corrected window
+
+Detailed output-path/PFSNAP logs are currently available only for the primary T430 validation platform.
 
 ---
 
