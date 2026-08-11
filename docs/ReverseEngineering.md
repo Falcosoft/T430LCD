@@ -39,6 +39,15 @@ Graphics BAR0: F0000000h
 Intel OpRegion ASLS: DAF55018h
 ```
 
+The complete utility set has subsequently also been confirmed working on:
+
+- Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000
+- HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000
+
+These are community confirmations rather than the primary reverse-engineering
+platform. Their exact internal panel resolutions and detailed register/output-path
+logs are not yet recorded.
+
 Compatibility with other systems is not assumed from register layout alone.
 
 ## 3. Initial firmware investigation
@@ -781,4 +790,4 @@ The project produced:
 - logical disable/re-enable controls for ASPECT and ASPECTD
 - documented Intel Ivy Bridge MMIO behavior
 
-The ThinkPad T430 remains the primary fully documented validation platform. Additional Ivy Bridge/Intel HD Graphics 4000 laptops have also been reported working, but their exact models and detailed results are not yet recorded in this repository.
+The ThinkPad T430 remains the primary fully documented validation platform. The complete utility set has also been confirmed working on a Lenovo IdeaPad Yoga 13 with a Core i5-3427U and an HP EliteBook Folio 9470m with a Core i5-3427U, both using Intel HD Graphics 4000. Their exact internal panel resolutions and detailed output-path/PFSNAP results are not yet recorded.
