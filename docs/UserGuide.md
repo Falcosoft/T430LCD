@@ -30,10 +30,12 @@ Primary verified platform:
 
 The complete T430LCD utility set has also been confirmed working on:
 
-- Lenovo IdeaPad Yoga 13 — Intel Core i5-3427U / Intel HD Graphics 4000
-- HP EliteBook Folio 9470m — Intel Core i5-3427U / Intel HD Graphics 4000
+- Lenovo IdeaPad Yoga 13 — Intel Core i5-3427U / Intel HD Graphics 4000 — internal 1600×900 LCD
+- HP EliteBook Folio 9470m — Intel Core i5-3427U / Intel HD Graphics 4000 — internal 1366×768 LCD
 
-These are community hardware confirmations. Their exact internal panel resolutions and detailed output-path/PFSNAP results are not yet documented here.
+These are community hardware confirmations. The Yoga 13 uses the same 1600×900 internal-panel geometry as the T430. On the 9470m, user feedback and screenshots confirm that ASPECT correctly produces a centered 1024×768 4:3 window at X=171, Y=0 from the 1366×768 panel.
+
+Detailed output-path/PFSNAP results for the two community-tested systems are not yet documented.
 
 ### Software
 
@@ -218,13 +220,17 @@ PATH C:\DOS;C:\UTIL
 
 ### Internal LCD
 
-On the verified 1600×900 panel:
+ASPECT calculates the largest centered 4:3 window dynamically from the detected fitter destination.
 
-```text
-native fitter destination: 1600×900
-calculated 4:3 window:      1200×900
-position:                   200,0
-```
+Confirmed internal-panel results are:
+
+| System | Native fitter destination | Corrected 4:3 window | Position |
+|--------|---------------------------|------------------------|----------|
+| ThinkPad T430 | 1600×900 | 1200×900 | X=200, Y=0 |
+| IdeaPad Yoga 13 | 1600×900 | 1200×900 | X=200, Y=0 |
+| EliteBook Folio 9470m | 1366×768 | 1024×768 | X=171, Y=0 |
+
+The 9470m result is confirmed by user feedback and screenshots and demonstrates that ASPECT's geometry calculation is not tied to the T430's 1600×900 panel.
 
 ### External analog VGA
 
