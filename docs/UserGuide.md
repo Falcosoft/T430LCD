@@ -28,7 +28,12 @@ Primary verified platform:
 - external analog VGA output
 - external digital/DVI output
 
-Additional Ivy Bridge/Intel HD Graphics 4000 laptops have also been reported working, but their exact models and detailed test results are not yet documented here.
+The complete T430LCD utility set has also been confirmed working on:
+
+- Lenovo IdeaPad Yoga 13 — Intel Core i5-3427U / Intel HD Graphics 4000
+- HP EliteBook Folio 9470m — Intel Core i5-3427U / Intel HD Graphics 4000
+
+These are community hardware confirmations. Their exact internal panel resolutions and detailed output-path/PFSNAP results are not yet documented here.
 
 ### Software
 
