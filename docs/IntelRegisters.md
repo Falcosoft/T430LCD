@@ -2,7 +2,7 @@
 
 ## 1. Scope
 
-This document lists the Intel Ivy Bridge graphics registers and firmware fields used or examined by T430LCD.
+This document lists the Intel graphics registers and firmware fields used or examined by T430LCD.
 
 All offsets are relative to the Intel graphics MMIO BAR0 unless explicitly described otherwise.
 
@@ -12,7 +12,7 @@ Verified BAR0 on the primary T430:
 F0000000h
 ```
 
-The project writes only a small subset of the registers listed here.
+The project writes only a small subset of the registers listed here. In T430LCD 2.3, ASPECT/ASPECTD also read Pipe A `PIPESRC` for the `/C` pixel-perfect centered policy; no pipe register is written.
 
 ## 2. PCI configuration
 
@@ -34,7 +34,7 @@ Purpose:
 
 - graphics MMIO base address
 
-Verified value:
+Verified value on the primary T430:
 
 ```text
 F0000000h
@@ -56,15 +56,13 @@ Purpose:
 
 - physical address of Intel graphics OpRegion
 
-Verified value:
+Verified T430 value:
 
 ```text
 DAF55018h
 ```
 
-Important:
-
-Do not align ASLS down to a page boundary. The low `18h` is part of the actual address on the tested T430.
+Important: do not align ASLS down to a page boundary. The low `18h` is part of the actual address on the tested T430.
 
 ## 3. Intel OpRegion
 
@@ -108,12 +106,6 @@ Observed:
 80000006h
 ```
 
-Interpretation:
-
-- valid
-- stretch text
-- stretch graphics
-
 The mailbox was not an active control path under DOS because readiness, capability, current, and enabled fields were zero.
 
 ## 4. Backlight PWM registers
@@ -124,15 +116,11 @@ The mailbox was not an active control path under DOS because readiness, capabili
 BAR0+48250h
 ```
 
-Observed:
+Observed on the T430:
 
 ```text
 80000000h
 ```
-
-Role:
-
-- active CPU backlight control enable/state
 
 T430LCD does not need to rewrite this register for ordinary brightness changes.
 
@@ -141,10 +129,6 @@ T430LCD does not need to rewrite this register for ordinary brightness changes.
 ```text
 BAR0+48254h
 ```
-
-Role:
-
-- current active PWM duty
 
 Observed values:
 
@@ -168,10 +152,7 @@ Observed:
 11551155h
 ```
 
-Interpretation on the tested T430:
-
-- upper 16 bits contain maximum PWM value
-- maximum = `1155h`
+On the tested T430, the upper 16 bits contain the maximum PWM value (`1155h`).
 
 ### Legacy backlight candidates
 
@@ -181,6 +162,8 @@ BAR0+61254h
 ```
 
 These did not change during brightness-key testing and were not used by the final utilities.
+
+The brightness register policy is hardware-generation-specific. A community report confirms ASPECT on a Broadwell Dell Inspiron E5550 / Intel HD Graphics 5500, but BLCSET does not work on that laptop; therefore the Ivy Bridge PWM findings in this section must not be generalized to Broadwell.
 
 ## 5. Legacy panel fitter
 
@@ -200,9 +183,9 @@ Observed on the tested T430:
 00000000h
 ```
 
-The active path used Ivy Bridge CPU panel fitter A instead.
+The active path used the CPU panel fitter A instead.
 
-## 6. Ivy Bridge CPU panel fitters
+## 6. CPU panel fitters used by the primary Ivy Bridge investigation
 
 ### Fitter A
 
@@ -236,7 +219,7 @@ The active path used Ivy Bridge CPU panel fitter A instead.
 
 ### Control register
 
-Verified internal-LCD value:
+Verified T430 internal-LCD value:
 
 ```text
 PF_A_CTL = 80800000h
@@ -244,7 +227,6 @@ PF_A_CTL = 80800000h
 
 Important observed behavior:
 
-- bit 31 indicates enabled state
 - fitter A was active
 - fitters B and C were disabled
 - rewriting `PF_A_CTL` caused unstable full-screen restoration in one experiment
@@ -264,18 +246,7 @@ upper 16 bits = X position
 lower 16 bits = Y position
 ```
 
-Example:
-
-```text
-00C80000h
-```
-
-means:
-
-```text
-X = 200
-Y = 0
-```
+Example `00C80000h` means X=200, Y=0.
 
 ### Size encoding
 
@@ -306,25 +277,34 @@ The verified sequence is:
 
 Do not write:
 
-- control
-- vertical scale
-- horizontal scale
+- `PF_A_CTL`
+- `PF_A_VSCALE`
+- `PF_A_HSCALE`
 
 ### Internal LCD values
 
-BIOS full-screen state:
+T430 BIOS full-screen state:
 
 ```text
 PF_A_POS  = 00000000h
 PF_A_SIZE = 06400384h
 ```
 
-ASPECT/ASPECTD 4:3 state:
+T430 `/A` 4:3 state:
 
 ```text
 PF_A_POS  = 00C80000h
 PF_A_SIZE = 04B00384h
 ```
+
+Additional confirmed `/A` geometry:
+
+```text
+1366×768  -> 1024×768 at X=171,Y=0  (EliteBook Folio 9470m / HD 4000)
+1920×1080 -> 1440×1080 at X=240,Y=0 (Dell Inspiron E5550 / HD 5500, ASPECT report)
+```
+
+The Broadwell report demonstrates compatible ASPECT behavior on that system but does not turn the Ivy Bridge register observations into a universal Intel programming contract.
 
 ### External VGA examples
 
@@ -348,11 +328,11 @@ Legacy mode output:
 PF_A_SIZE = 028001E0h = 640×480
 ```
 
-This is already 4:3 and requires no correction.
+This is already 4:3 and requires no `/A` correction.
 
 ## 7. Display pipe registers
 
-The PFSNAP diagnostic captured the following groups.
+PFSNAP captured these groups on the primary T430.
 
 ### Pipe A
 
@@ -393,54 +373,108 @@ VSYNC     62014h
 PIPESRC   6201Ch
 ```
 
-### Dimension encoding
+### PIPESRC dimension encoding
 
-Many timing and source fields encode dimensions as:
+`PIPESRC` uses:
 
 ```text
-stored value = dimension - 1
+upper 16 bits = width - 1
+lower 16 bits = height - 1
 ```
 
 Example:
 
 ```text
-PIPESRC = 027F018Fh
-```
-
-decodes to:
-
-```text
-width  = 027Fh + 1 = 640
-height = 018Fh + 1 = 400
+PIPESRC = 027F018Fh -> 640×400
 ```
 
 ### Pipe A examples
 
-#### Internal/external text-style source
+Text-style source:
 
 ```text
-PIPESRC = 02CF018Fh
+PIPESRC = 02CF018Fh -> 720×400
 ```
 
-decodes to:
+Mode 13h source:
 
 ```text
-720×400
+PIPESRC = 027F018Fh -> 640×400
 ```
 
-#### Mode 13h source
+The mode 13h observation was important to v2.3 `/C`: the logical 320×200 VGA mode is already represented as a 640×400 pipe source on the tested path.
+
+## 8. T430LCD 2.3 display policies
+
+### `/A` aspect policy
+
+Installation geometry uses the active fixed-raster fitter size. Exact 4:3 is tested as:
 
 ```text
-PIPESRC = 027F018Fh
+width × 3 == height × 4
 ```
 
-decodes to:
+For a widescreen fixed raster, first try:
 
 ```text
-640×400
+target width  = height × 4 / 3
+target height = height
 ```
 
-## 8. Register-write policy
+If that width does not fit:
+
+```text
+target width  = width
+target height = width × 3 / 4
+```
+
+The changing dimension is rounded down to an even value and the result is centered.
+
+The old native-resolution VBE bypass was removed in v2.3. A successful native VBE mode follows `/A` when the normal fitter safety conditions allow correction.
+
+### `/C` pixel-perfect centered policy
+
+`/C` reads Pipe A `PIPESRC`, decodes the exact source dimensions and uses them as the fitter target:
+
+```text
+target width  = PIPESRC width
+target height = PIPESRC height
+X = (fixed width  - target width)  / 2
+Y = (fixed height - target height) / 2
+```
+
+No even rounding is applied in `/C` because the source dimensions must remain exact.
+
+A native source therefore naturally produces X=0,Y=0 and full-screen 1:1 output.
+
+### Legacy 320-wide compatibility exception
+
+Hardware testing found that standard BIOS modes `04h`, `05h` and `0Dh` can exhibit a half-width centered result when Pipe A reports exactly 320×400. The final rule is deliberately narrow:
+
+```text
+if AH=00h legacy mode is 04h, 05h or 0Dh
+and PIPESRC is exactly 320×400:
+    use target 640×400
+else:
+    use PIPESRC exactly
+```
+
+Only the horizontal dimension is doubled. Other tested 320×200 VGA modes, the Fractint non-standard 320×400×256 VGA-register-compatible mode, and tested 640×200 / 640×350 CGA/EGA-family modes work without this exception.
+
+### Per-mode ownership/safety rule
+
+After a watched mode set:
+
+```text
+if current PF_A_SIZE != installation fixed-raster PF_A_SIZE:
+    do not write
+```
+
+For explicit runtime `/A`↔`/C` switching, an exact match to the TSR's last-applied `PF_A_POS` and `PF_A_SIZE` is also accepted as owned state.
+
+This prevents corrupting mode-timed external outputs.
+
+## 9. Register-write policy
 
 ### Registers written by BLCSET/BLCSETD/BLCINIT
 
@@ -453,11 +487,19 @@ The write preserves unrelated upper bits and is verified immediately.
 ### Registers written by ASPECT/ASPECTD
 
 ```text
-BAR0+68070h
-BAR0+68074h
+BAR0+68070h  PF_A_POS
+BAR0+68074h  PF_A_SIZE
 ```
 
-The write order is position first, size second.
+The write order is position first, size second, and both are verified by readback.
+
+### Registers read by `/C`
+
+```text
+BAR0+6001Ch  Pipe A PIPESRC
+```
+
+This register is read only.
 
 ### Registers intentionally not written
 
@@ -465,15 +507,14 @@ The write order is position first, size second.
 BAR0+68080h  PF_A_CTL
 BAR0+68084h  PF_A_VSCALE
 BAR0+68090h  PF_A_HSCALE
+all pipe timing/source registers
 ```
 
-Neither ASPECT nor ASPECTD writes pipe timing registers.
-
-## 9. MMIO access conventions
+## 10. MMIO access conventions
 
 ### Direct plain-DOS backend
 
-The safe direct protected-mode design used by tools such as BLCSET and ASPECT uses:
+The safe direct protected-mode design used by BLCSET and ASPECT uses:
 
 ```text
 CS = 16-bit executable code selector
@@ -492,22 +533,22 @@ Rules:
 - use XMS for A20 control
 - do not execute the direct transition under EMM386/JEMM386 VM86
 
+The flat selector already exposes `BAR0+6001Ch`, so ASPECT `/C` needs no extra mapping.
+
 ### DPMI backend
 
 BLCSETD and ASPECTD use DPMI instead of direct CR0/LGDT switching.
 
-The verified DPMI design uses:
+The verified ASPECTD 2.3 design retains:
 
-- a resident 32-bit DPMI host such as HDPMI32
-- DPMI function `0800h` physical-address mapping
-- DPMI selectors configured for the mapped MMIO
-- a DPMI real-mode callback for the resident ASPECTD INT 10h path
-- release of temporary BLCSETD selectors/mappings before termination
+- a 4 KiB mapping at `BAR0+68000h` for fitter A position/size
+- a separate 4 KiB mapping at `BAR0+60000h` for read-only Pipe A `PIPESRC`
+- DPMI selectors configured for both mappings
+- a DPMI real-mode callback for the resident INT 10h path
 
-ASPECTD keeps its mapped fitter page, selector, callback, and DPMI client resident
-for later BIOS mode changes.
+The Pipe A mapping remains resident even when ASPECTD starts in `/A`, allowing later `/C` switching.
 
-## 10. Explicit MMIO instruction encodings
+## 11. Explicit MMIO instruction encodings
 
 ### Read DWORD from DS:[ESI]
 
@@ -521,55 +562,16 @@ db 067h,066h,08Bh,006h
 db 067h,066h,089h,006h
 ```
 
-These encodings are used by the 16-bit direct protected-mode sources where needed.
-DPMI clients can access mapped MMIO through their DPMI selectors.
-
-## 11. Conservative aspect-ratio rules
-
-At installation:
-
-```text
-if width × 3 == height × 4:
-    output is already 4:3
-    do not install correction hook
-```
-
-For widescreen fixed-raster output:
-
-```text
-target width  = height × 4 / 3
-target height = height
-```
-
-If that width does not fit:
-
-```text
-target width  = width
-target height = width × 3 / 4
-```
-
-Centering:
-
-```text
-X = (output width  - target width)  / 2
-Y = (output height - target height) / 2
-```
-
-After a mode set:
-
-```text
-if current PF_A_SIZE != installation PF_A_SIZE:
-    do not write
-```
-
-This prevents corrupting external mode-timed outputs.
+These encodings are used by the 16-bit direct protected-mode sources where needed. DPMI clients can access mapped MMIO through their DPMI selectors.
 
 ## 12. Known limits
 
-- The detailed register layout and values in this document are based primarily on the tested T430.
-- Fitter A was the active fitter on all primary T430 test paths.
-- Other firmware may select fitter B or C.
+- The detailed register layout and primary measurements are based on the ThinkPad T430 / Intel HD Graphics 4000.
+- Fitter A was the active fitter on the primary T430 test paths.
+- Other firmware may select different fitters or use different register behavior.
 - The direct CR0/LGDT backend is not usable from EMM386/JEMM386 virtual-8086 mode.
 - ASPECTD and BLCSETD provide the DPMI path and have been verified with JEMM386/HDPMI32 on the T430.
-- Other DPMI hosts, memory-manager combinations, and Ivy Bridge systems require independent testing.
-- The register reference documents measured behavior, not a universal Intel programming contract.
+- The detailed v2.3 `/C` legacy-mode matrix is from the T430.
+- ASPECT has a positive community report on a Broadwell Dell Inspiron E5550 / Intel HD Graphics 5500, but BLCSET does not work there. This is component-specific compatibility evidence, not general Broadwell support.
+- Other DPMI hosts, memory-manager combinations, Intel generations, and systems require independent testing.
+- This reference documents measured behavior, not a universal Intel programming contract.
