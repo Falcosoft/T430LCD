@@ -1,16 +1,15 @@
 ; ASPECT.ASM
-; Lenovo ThinkPad T430 / Intel HD Graphics 4000
-; Resident aspect-ratio corrector for the Lenovo ThinkPad T430.
+; T430LCD 2.3 - ASPECT
+; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
+; Resident aspect-ratio / pixel-perfect centered display corrector.
 ;
-; At installation it reads the active Fitter A destination size.
-;
-; If that destination is already 4:3, the BIOS output path is considered
-; self-correcting and no TSR hook is installed.
-;
-; Otherwise ASPECT derives the largest centered 4:3 window dynamically and
-; hooks INT 10h. After each mode set, it first checks whether the BIOS restored
-; the same widescreen destination captured at installation. Only then does it
-; reapply the 4:3 window.
+; At installation it reads the active Fitter A destination size. The default
+; /A policy retains the proven dynamic 4:3 correction algorithm. /C instead
+; reads Pipe A PIPESRC and centers that exact raster inside the fixed output.
+; After each mode set, ASPECT first checks whether the BIOS restored the same
+; fixed-raster destination captured at installation before applying a policy.
+; /A has no native-VBE bypass: native modes can also be corrected to 4:3.
+; /C remains pixel-perfect naturally because its target comes from PIPESRC.
 ;
 ; IMPORTANT:
 ; If the hook is invoked in virtual-8086 mode (for example through a DPMI
@@ -22,10 +21,12 @@
 ;   TLINK /t ASPECT.OBJ
 ;
 ; Commands:
-;   ASPECT       install
-;   ASPECT /U    physically unload the TSR
-;   ASPECT /D    deactivate correction without unloading
-;   ASPECT /E    re-enable correction
+;   ASPECT        install with aspect-ratio correction (unchanged default)
+;   ASPECT /A     install/select aspect-ratio correction
+;   ASPECT /C     install/select pixel-perfect centered mode
+;   ASPECT /U     restore/deactivate, then physically unload the TSR
+;   ASPECT /D     deactivate correction without unloading
+;   ASPECT /E     re-enable the selected policy
 ;
 ; Requirements:
 ;   - plain real-mode DOS for active correction
@@ -47,9 +48,7 @@ include T430LCD.INC
 
 PF_A_POS  equ PF_A_POS_OFFSET
 PF_A_SIZE equ PF_A_SIZE_OFFSET
-
-VBE_MODE_INFO_XRES equ 12h
-VBE_MODE_INFO_YRES equ 14h
+PIPE_A_SRC equ 06001Ch
 
 MUX_PRESENT       equ 0FEC0h
 MUX_PRESENT_REPLY equ 0C0FEh
@@ -68,10 +67,15 @@ STATE_ENABLED        equ 00h
 STATE_USER_DISABLED  equ 01h
 STATE_WRITE_FAILED   equ 02h
 
-OP_MODE              equ 00h
-CMD_DISABLE          equ 01h
-CMD_ENABLE           equ 02h
-OP_APPLY             equ 03h
+POLICY_ASPECT         equ 00h
+POLICY_CENTER         equ 01h
+
+OP_MODE               equ 00h
+CMD_DISABLE           equ 01h
+CMD_ENABLE            equ 02h
+CMD_ASPECT            equ 03h
+CMD_CENTER            equ 04h
+OP_APPLY              equ 05h
 
 CTL_DISABLED_RESTORED equ 01h
 CTL_DISABLED_ONLY     equ 02h
@@ -81,14 +85,19 @@ CTL_ENABLED_PENDING  equ 05h
 CTL_ALREADY_ENABLED  equ 06h
 CTL_WRITE_FAILED     equ 07h
 CTL_BUSY             equ 08h
-CTL_LOCKED           equ 09h
-CTL_BAD_COMMAND      equ 0FFh
+CTL_LOCKED            equ 09h
+CTL_POLICY_APPLIED    equ 0Ah
+CTL_POLICY_PENDING    equ 0Bh
+CTL_POLICY_SELECTED   equ 0Ch
+CTL_BAD_COMMAND       equ 0FFh
 
-ARG_DEFAULT          equ 00h
-ARG_UNINSTALL        equ 01h
-ARG_DISABLE          equ 02h
-ARG_ENABLE           equ 03h
-ARG_INVALID          equ 0FFh
+ARG_DEFAULT           equ 00h
+ARG_UNINSTALL         equ 01h
+ARG_DISABLE           equ 02h
+ARG_ENABLE            equ 03h
+ARG_ASPECT            equ 04h
+ARG_CENTER            equ 05h
+ARG_INVALID           equ 0FFh
 
 
 start:
@@ -130,6 +139,10 @@ MuxControl:
         je MuxControlValid
         cmp bl,CMD_ENABLE
         je MuxControlValid
+        cmp bl,CMD_ASPECT
+        je MuxControlValid
+        cmp bl,CMD_CENTER
+        je MuxControlValid
 
         mov ax,MUX_CONTROL_REPLY
         mov bl,CTL_BAD_COMMAND
@@ -165,7 +178,7 @@ NewInt2F endp
 
 ; ----------------------------------------------------------------------
 ; INT 10h hook.
-; Calls the original BIOS first. Reapplies aspect only for mode-set calls.
+; Calls the original BIOS first. Applies the selected policy only for mode-set calls.
 ; ----------------------------------------------------------------------
 NewInt10 proc far
         cmp     ah,00h
@@ -176,11 +189,11 @@ NewInt10 proc far
 
 HookLegacyModeSet:
         mov     byte ptr cs:[ModeSetKind],1
+        mov     byte ptr cs:[RequestedLegacyMode],al
         jmp     short HookCallOriginal
 
 HookVbeModeSet:
         mov     byte ptr cs:[ModeSetKind],2
-        mov     word ptr cs:[RequestedVbeMode],bx
 
 HookCallOriginal:
         pushf
@@ -195,29 +208,13 @@ HookCallOriginal:
         push    gs
 
         ; A failed VBE mode set must not trigger any fitting update.
+        ; Successful VBE modes use the same selected policy as legacy modes:
+        ; /A always applies the 4:3 target when the fitter safety checks allow
+        ; it, while /C naturally remains pixel-perfect through PIPESRC.
         cmp     byte ptr cs:[ModeSetKind],2
         jne     HookCheckState
         cmp     ax,004Fh
         jne     HookRestore
-
-        ; Query the requested VBE mode through the original BIOS handler.
-        mov     ax,cs
-        mov     es,ax
-        mov     di,offset VbeModeInfo
-        mov     cx,word ptr cs:[RequestedVbeMode]
-        and     cx,3FFFh
-        mov     ax,4F01h
-        pushf
-        call    dword ptr cs:[OldInt10]
-        cmp     ax,004Fh
-        jne     HookCheckState
-
-        mov     dx,word ptr cs:[NativeWidth]
-        cmp     word ptr cs:[VbeModeInfo+VBE_MODE_INFO_XRES],dx
-        jne     HookCheckState
-        mov     dx,word ptr cs:[NativeHeight]
-        cmp     word ptr cs:[VbeModeInfo+VBE_MODE_INFO_YRES],dx
-        je      HookRestore          ; native output mode: leave full-screen
 
 HookCheckState:
         cmp     byte ptr cs:[CorrectionState],STATE_ENABLED
@@ -247,7 +244,6 @@ HookRestore:
         popfd
         iret
 NewInt10 endp
-
 ; ----------------------------------------------------------------------
 ; Switch from an interrupt caller's stack to ASPECT's private resident stack
 ; before entering the protected-mode MMIO engine.
@@ -278,6 +274,8 @@ EngineFromInterrupt endp
 ;   OP_MODE     - normal post-mode-set correction
 ;   CMD_DISABLE - logical /D
 ;   CMD_ENABLE  - logical /E
+;   CMD_ASPECT  - select aspect-ratio policy (/A)
+;   CMD_CENTER  - select pixel-perfect centered policy (/C)
 ;   OP_APPLY    - installation-time initial apply
 ;
 ; The engine performs one RM->PM->RM transition per operation and shares the
@@ -319,6 +317,10 @@ EnginePmEntry:
         je EnginePmDisable
         cmp al,CMD_ENABLE
         je EnginePmEnable
+        cmp al,CMD_ASPECT
+        je EnginePmSelectPolicy
+        cmp al,CMD_CENTER
+        je EnginePmSelectPolicy
         cmp al,OP_APPLY
         je EnginePmInitialApply
 
@@ -337,7 +339,9 @@ EnginePmMode:
         cmp eax,dword ptr es:[NativeSize]
         jne EnginePmLeave
 
-        call PmApplyAspect
+        call PmPrepareTarget
+        jc EnginePmLeave
+        call PmApplyTarget
         jnc EnginePmLeave
 
         ; Match ASPECTD fail-safe behavior.
@@ -366,13 +370,13 @@ EnginePmDisableActive:
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_POS
         MMIO_READ_EAX_ESI
-        cmp eax,dword ptr es:[AspectPos]
+        cmp eax,dword ptr es:[AppliedPos]
         jne EnginePmDisableNoRestore
 
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_SIZE
         MMIO_READ_EAX_ESI
-        cmp eax,dword ptr es:[AspectSize]
+        cmp eax,dword ptr es:[AppliedSize]
         jne EnginePmDisableNoRestore
 
         call PmRestoreOriginal
@@ -406,7 +410,9 @@ EnginePmEnable:
         cmp eax,dword ptr es:[NativeSize]
         jne EnginePmEnablePending
 
-        call PmApplyAspect
+        call PmPrepareTarget
+        jc EnginePmEnablePending
+        call PmApplyTarget
         jnc EnginePmEnableApplied
 
         mov byte ptr es:[CorrectionState],STATE_WRITE_FAILED
@@ -430,10 +436,75 @@ EnginePmEnableLocked:
         mov byte ptr es:[ControlResult],CTL_LOCKED
         jmp EnginePmLeave
 
+; /A or /C - select a policy. If correction is currently enabled, apply the
+; new policy immediately only when the fitter is either at the installation
+; fixed raster or still exactly owned by ASPECT. Otherwise remember the policy
+; and wait for the next compatible BIOS mode set.
+EnginePmSelectPolicy:
+        cmp byte ptr es:[CorrectionState],STATE_WRITE_FAILED
+        je EnginePmSelectLocked
+
+        mov al,byte ptr es:[EngineOperation]
+        cmp al,CMD_CENTER
+        jne EnginePmSelectAspect
+        mov byte ptr es:[CurrentPolicy],POLICY_CENTER
+        jmp short EnginePmSelectState
+EnginePmSelectAspect:
+        mov byte ptr es:[CurrentPolicy],POLICY_ASPECT
+
+EnginePmSelectState:
+        cmp byte ptr es:[CorrectionState],STATE_ENABLED
+        jne EnginePmSelectDisabled
+
+        ; Safe if BIOS currently owns the original fixed-raster state.
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_SIZE
+        MMIO_READ_EAX_ESI
+        cmp eax,dword ptr es:[NativeSize]
+        je EnginePmSelectApply
+
+        ; Or safe if the current state is exactly ASPECT's last applied state.
+        cmp eax,dword ptr es:[AppliedSize]
+        jne EnginePmSelectPending
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_POS
+        MMIO_READ_EAX_ESI
+        cmp eax,dword ptr es:[AppliedPos]
+        jne EnginePmSelectPending
+
+EnginePmSelectApply:
+        call PmPrepareTarget
+        jc EnginePmSelectPending
+        call PmApplyTarget
+        jnc EnginePmSelectApplied
+
+        mov byte ptr es:[CorrectionState],STATE_WRITE_FAILED
+        call PmRestoreOriginal
+        mov byte ptr es:[ControlResult],CTL_WRITE_FAILED
+        jmp EnginePmLeave
+
+EnginePmSelectApplied:
+        mov byte ptr es:[ControlResult],CTL_POLICY_APPLIED
+        jmp EnginePmLeave
+EnginePmSelectPending:
+        mov byte ptr es:[ControlResult],CTL_POLICY_PENDING
+        jmp EnginePmLeave
+EnginePmSelectDisabled:
+        mov byte ptr es:[ControlResult],CTL_POLICY_SELECTED
+        jmp EnginePmLeave
+EnginePmSelectLocked:
+        mov byte ptr es:[ControlResult],CTL_LOCKED
+        jmp EnginePmLeave
+
 ; Initial installation write. Failure restores the installation state and
 ; reports EngineStatus=1 to the transient installer.
 EnginePmInitialApply:
-        call PmApplyAspect
+        call PmPrepareTarget
+        jnc EnginePmInitialPrepared
+        mov byte ptr es:[EngineStatus],2
+        jmp EnginePmLeave
+EnginePmInitialPrepared:
+        call PmApplyTarget
         jnc EnginePmLeave
 
         call PmRestoreOriginal
@@ -468,39 +539,126 @@ EngineRmReturn:
 ResidentEngineCore endp
 
 ; ----------------------------------------------------------------------
-; Protected-mode helper: write ASPECT's 4:3 POS/SIZE and verify both.
-; CF clear = success, CF set = verification failure.
+; Protected-mode helper: prepare the active policy target.
+; /A copies the installation-time 4:3 geometry. /C reads Pipe A PIPESRC,
+; decodes its dimension-minus-one fields, and centers that exact source raster.
+; CF clear = valid target; CF set = source cannot be centered in native raster.
 ; ----------------------------------------------------------------------
-PmApplyAspect proc near
-        mov esi,dword ptr es:[MmioBase]
-        add esi,PF_A_POS
+PmPrepareTarget proc near
+        cmp byte ptr es:[CurrentPolicy],POLICY_CENTER
+        je PmPrepareCenter
+
         mov eax,dword ptr es:[AspectPos]
-        MMIO_WRITE_EAX_ESI
-
-        mov esi,dword ptr es:[MmioBase]
-        add esi,PF_A_SIZE
+        mov dword ptr es:[AppliedPos],eax
         mov eax,dword ptr es:[AspectSize]
-        MMIO_WRITE_EAX_ESI
-
-        mov esi,dword ptr es:[MmioBase]
-        add esi,PF_A_POS
-        MMIO_READ_EAX_ESI
-        cmp eax,dword ptr es:[AspectPos]
-        jne PmApplyAspectBad
-
-        mov esi,dword ptr es:[MmioBase]
-        add esi,PF_A_SIZE
-        MMIO_READ_EAX_ESI
-        cmp eax,dword ptr es:[AspectSize]
-        jne PmApplyAspectBad
-
+        mov dword ptr es:[AppliedSize],eax
         clc
         ret
 
-PmApplyAspectBad:
+PmPrepareCenter:
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PIPE_A_SRC
+        MMIO_READ_EAX_ESI
+
+        mov edx,eax
+        shr eax,16
+        and edx,0FFFFh
+        inc ax
+        inc dx
+        test ax,ax
+        jz PmPrepareBad
+        test dx,dx
+        jz PmPrepareBad
+
+        ; The observed CGA 4-color and EGA 320x200x16 symptoms are consistent
+        ; with BIOS modes 04h/05h/0Dh reaching Pipe A as 320x400: vertical
+        ; doubling present, horizontal doubling absent. Apply x2 horizontally
+        ; only when that exact source geometry is actually observed.
+        cmp byte ptr es:[ModeSetKind],1
+        jne PmPrepareCenterSized
+        mov bl,byte ptr es:[RequestedLegacyMode]
+        and bl,7Fh
+        cmp bl,04h
+        je PmPrepareLegacy320Check
+        cmp bl,05h
+        je PmPrepareLegacy320Check
+        cmp bl,0Dh
+        jne PmPrepareCenterSized
+PmPrepareLegacy320Check:
+        cmp ax,320
+        jne PmPrepareCenterSized
+        cmp dx,400
+        jne PmPrepareCenterSized
+        shl ax,1
+
+PmPrepareCenterSized:
+        cmp ax,word ptr es:[NativeWidth]
+        ja PmPrepareBad
+        cmp dx,word ptr es:[NativeHeight]
+        ja PmPrepareBad
+
+        mov si,ax
+        mov di,dx
+
+        mov bx,word ptr es:[NativeWidth]
+        sub bx,si
+        shr bx,1
+        mov cx,word ptr es:[NativeHeight]
+        sub cx,di
+        shr cx,1
+
+        xor eax,eax
+        mov ax,bx
+        shl eax,16
+        mov ax,cx
+        mov dword ptr es:[AppliedPos],eax
+
+        xor eax,eax
+        mov ax,si
+        shl eax,16
+        mov ax,di
+        mov dword ptr es:[AppliedSize],eax
+        clc
+        ret
+
+PmPrepareBad:
         stc
         ret
-PmApplyAspect endp
+PmPrepareTarget endp
+
+; ----------------------------------------------------------------------
+; Protected-mode helper: write the prepared POS/SIZE and verify both.
+; CF clear = success, CF set = verification failure.
+; ----------------------------------------------------------------------
+PmApplyTarget proc near
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_POS
+        mov eax,dword ptr es:[AppliedPos]
+        MMIO_WRITE_EAX_ESI
+
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_SIZE
+        mov eax,dword ptr es:[AppliedSize]
+        MMIO_WRITE_EAX_ESI
+
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_POS
+        MMIO_READ_EAX_ESI
+        cmp eax,dword ptr es:[AppliedPos]
+        jne PmApplyTargetBad
+
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_SIZE
+        MMIO_READ_EAX_ESI
+        cmp eax,dword ptr es:[AppliedSize]
+        jne PmApplyTargetBad
+
+        clc
+        ret
+PmApplyTargetBad:
+        stc
+        ret
+PmApplyTarget endp
 
 ; ----------------------------------------------------------------------
 ; Protected-mode helper: restore installation POS/SIZE and verify both.
@@ -564,16 +722,19 @@ OldInt2F            dd 0
 XmsEntry            dd 0
 EnvironmentSegment  dw 0
 CorrectionState     db STATE_ENABLED
+CurrentPolicy       db POLICY_ASPECT
 
 MmioBase            dd 0
 NativeSize          dd 0
 OriginalPos         dd 0
 AspectPos           dd 0
 AspectSize          dd 0
+AppliedPos          dd 0
+AppliedSize         dd 0
 
 NativeWidth         dw 0
 NativeHeight        dw 0
-RequestedVbeMode    dw 0
+RequestedLegacyMode db 0
 CallerSS            dw 0
 CallerSP            dw 0
 SavedFlags          dw 0
@@ -584,9 +745,6 @@ ModeSetKind         db 0
 EngineOperation     db OP_MODE
 EngineStatus        db 0
 ControlResult       db 0
-
-; VBE 2.0 ModeInfoBlock must remain resident because INT 10h uses it.
-VbeModeInfo         db 256 dup (0)
 
 ; Private stack used by resident INT 10h / INT 2Fh control operations.
 LocalStack          db 512 dup (0)
@@ -621,10 +779,20 @@ CommandParsed:
         je SendDisable
         cmp al,ARG_ENABLE
         je SendEnable
+        cmp al,ARG_ASPECT
+        je SelectAspectCommand
+        cmp al,ARG_CENTER
+        je SelectCenterCommand
 
-        mov dx,offset MsgTitle
-        call PrintZ
-
+InstallDefault:
+        mov byte ptr [CurrentPolicy],POLICY_ASPECT
+        jmp short InstallBegin
+InstallAspect:
+        mov byte ptr [CurrentPolicy],POLICY_ASPECT
+        jmp short InstallBegin
+InstallCenter:
+        mov byte ptr [CurrentPolicy],POLICY_CENTER
+InstallBegin:
         ; Refuse installation if already present.
         mov ax,MUX_PRESENT
         int 2Fh
@@ -640,11 +808,6 @@ CommandParsed:
         mov dword ptr [MmioBase],eax
         test eax,eax
         jz BarFail
-
-        mov dx,offset MsgBar
-        call PrintZ
-        call PrintHex32
-        call PrintCRLF
 
         ; Require XMS and globally enable A20. The resident interrupt handler
         ; must not call XMS from inside INT 10h.
@@ -685,36 +848,38 @@ CommandParsed:
         call PrintDec16
         call PrintCRLF
 
+        cmp byte ptr [CurrentPolicy],POLICY_CENTER
+        je ApplyInitialPolicy
         cmp byte ptr [CorrectionNeeded],0
-        jne ShowAspectWindow
+        jne ApplyInitialPolicy
 
         mov dx,offset MsgAlready43
         call PrintZ
         mov ax,4C00h
         int 21h
 
-ShowAspectWindow:
-        mov dx,offset MsgAspectWindow
-        call PrintZ
-        mov ax,word ptr [AspectWidth]
-        call PrintDec16
-        mov dl,'x'
-        call PutCh
-        mov ax,word ptr [AspectHeight]
-        call PrintDec16
-        mov dx,offset MsgAt
-        call PrintZ
-        mov ax,word ptr [AspectX]
-        call PrintDec16
-        mov dl,','
-        call PutCh
-        mov ax,word ptr [AspectY]
-        call PrintDec16
-        call PrintCRLF
-
+ApplyInitialPolicy:
         ; Apply once to the current mode before installing the interrupt hooks.
         call ApplyAspectForeground
         jc GeometryFailed
+
+        mov dx,offset MsgTargetWindow
+        call PrintZ
+        mov ax,word ptr [AppliedSize+2]
+        call PrintDec16
+        mov dl,'x'
+        call PutCh
+        mov ax,word ptr [AppliedSize]
+        call PrintDec16
+        mov dx,offset MsgAt
+        call PrintZ
+        mov ax,word ptr [AppliedPos+2]
+        call PrintDec16
+        mov dl,','
+        call PutCh
+        mov ax,word ptr [AppliedPos]
+        call PrintDec16
+        call PrintCRLF
 
         ; Save original INT 10h vector.
         mov ax,3510h
@@ -742,7 +907,13 @@ ShowAspectWindow:
         int 21h
         pop ds
 
-        mov dx,offset MsgInstalled
+        cmp byte ptr [CurrentPolicy],POLICY_CENTER
+        je InstallPrintCenter
+        mov dx,offset MsgInstalledAspect
+        jmp short InstallPrintDone
+InstallPrintCenter:
+        mov dx,offset MsgInstalledCenter
+InstallPrintDone:
         call PrintZ
 
         ; INT 21h/AH=31h expects the number of paragraphs to keep,
@@ -820,6 +991,34 @@ SendEnable:
         mov ax,4C00h
         int 21h
 
+SelectAspectCommand:
+        mov ax,MUX_PRESENT
+        int 2Fh
+        cmp ax,MUX_PRESENT_REPLY
+        jne InstallAspect
+        mov ax,MUX_CONTROL
+        mov bl,CMD_ASPECT
+        int 2Fh
+        cmp ax,MUX_CONTROL_REPLY
+        jne ControlProtocolFail
+        call PrintPolicyResult
+        mov ax,4C00h
+        int 21h
+
+SelectCenterCommand:
+        mov ax,MUX_PRESENT
+        int 2Fh
+        cmp ax,MUX_PRESENT_REPLY
+        jne InstallCenter
+        mov ax,MUX_CONTROL
+        mov bl,CMD_CENTER
+        int 2Fh
+        cmp ax,MUX_CONTROL_REPLY
+        jne ControlProtocolFail
+        call PrintPolicyResult
+        mov ax,4C00h
+        int 21h
+
 ControlNotInstalled:
         mov dx,offset MsgNotInstalled
         call PrintZ
@@ -834,7 +1033,7 @@ ControlProtocolFail:
 
 ; ----------------------------------------------------------------------
 ; Command parser.
-; AL = ARG_DEFAULT / ARG_UNINSTALL / ARG_DISABLE / ARG_ENABLE / ARG_INVALID.
+; AL = ARG_DEFAULT / ARG_UNINSTALL / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_CENTER / ARG_INVALID.
 ; Both '/' and '-' are accepted. Only one standalone switch is valid.
 ; ----------------------------------------------------------------------
 ParseCommand proc near
@@ -896,6 +1095,10 @@ ParseClassify:
         je ParseDisable
         cmp dl,'E'
         je ParseEnable
+        cmp dl,'A'
+        je ParseAspect
+        cmp dl,'C'
+        je ParseCenter
         jmp ParseInvalid
 
 ParseUninstall:
@@ -906,6 +1109,12 @@ ParseDisable:
         jmp ParseDone
 ParseEnable:
         mov al,ARG_ENABLE
+        jmp ParseDone
+ParseAspect:
+        mov al,ARG_ASPECT
+        jmp ParseDone
+ParseCenter:
+        mov al,ARG_CENTER
         jmp ParseDone
 ParseDefault:
         mov al,ARG_DEFAULT
@@ -925,9 +1134,6 @@ ParseCommand endp
 ; and INT 2Fh. Otherwise restoring the saved vectors would break the chain.
 ; ----------------------------------------------------------------------
 Uninstall:
-        mov dx,offset MsgTitle
-        call PrintZ
-
         mov ax,MUX_INFO
         int 2Fh
         cmp ax,MUX_INFO_REPLY
@@ -973,6 +1179,23 @@ Uninstall:
         cmp ax,word ptr cs:[ResidentSegment]
         jne UninstallUnsafe
 
+        ; Execute the same logical disable/restore operation as /D while the
+        ; resident control path and MMIO engine are still available. Continue
+        ; only for normal /D outcomes; an uncertain restore must keep the TSR.
+        mov ax,MUX_CONTROL
+        mov bl,CMD_DISABLE
+        int 2Fh
+        cmp ax,MUX_CONTROL_REPLY
+        jne UninstallRestoreFailed
+        cmp bl,CTL_DISABLED_RESTORED
+        je UninstallRestoreDone
+        cmp bl,CTL_DISABLED_ONLY
+        je UninstallRestoreDone
+        cmp bl,CTL_ALREADY_DISABLED
+        je UninstallRestoreDone
+        jmp UninstallRestoreFailed
+
+UninstallRestoreDone:
         ; Restore INT 10h first.
         push ds
         mov ax,word ptr cs:[SavedOldInt10+2]
@@ -1029,6 +1252,12 @@ UninstallUnsafe:
 
 UninstallFreeFailed:
         mov dx,offset MsgFreeFailed
+        call PrintZ
+        mov ax,4C01h
+        int 21h
+
+UninstallRestoreFailed:
+        mov dx,offset MsgUnloadRestoreFail
         call PrintZ
         mov ax,4C01h
         int 21h
@@ -1156,6 +1385,16 @@ DetectPmEntry:
         jne DetectNeedsCorrection
 
         mov byte ptr es:[CorrectionNeeded],0
+        mov eax,dword ptr es:[OriginalPos]
+        mov dword ptr es:[AspectPos],eax
+        mov eax,dword ptr es:[NativeSize]
+        mov dword ptr es:[AspectSize],eax
+        mov ax,word ptr es:[NativeWidth]
+        mov word ptr es:[AspectWidth],ax
+        mov ax,word ptr es:[NativeHeight]
+        mov word ptr es:[AspectHeight],ax
+        mov word ptr es:[AspectX],0
+        mov word ptr es:[AspectY],0
         mov byte ptr es:[DetectStatus],0
         jmp DetectPmLeave
 
@@ -1508,6 +1747,48 @@ PrintControlUnknown2:
         ret
 PrintEnableResult endp
 
+PrintPolicyResult proc near
+        cmp bl,CTL_POLICY_APPLIED
+        je PrintPolicyNormal
+        cmp bl,CTL_POLICY_PENDING
+        je PrintPolicyNormal
+        cmp bl,CTL_POLICY_SELECTED
+        je PrintPolicyNormal
+        cmp bl,CTL_WRITE_FAILED
+        je PrintWriteFailed3
+        cmp bl,CTL_LOCKED
+        je PrintLocked3
+        cmp bl,CTL_BUSY
+        je PrintBusy3
+        jmp PrintPolicyUnknown
+PrintPolicyNormal:
+        cmp byte ptr [StartupCommand],ARG_CENTER
+        je PrintPolicyCenter
+        mov dx,offset MsgModeAspect
+        call PrintZ
+        ret
+PrintPolicyCenter:
+        mov dx,offset MsgModeCenter
+        call PrintZ
+        ret
+PrintWriteFailed3:
+        mov dx,offset MsgWriteFailed
+        call PrintZ
+        ret
+PrintLocked3:
+        mov dx,offset MsgLocked
+        call PrintZ
+        ret
+PrintBusy3:
+        mov dx,offset MsgBusy
+        call PrintZ
+        ret
+PrintPolicyUnknown:
+        mov dx,offset MsgControlFail
+        call PrintZ
+        ret
+PrintPolicyResult endp
+
 
 ; ----------------------------------------------------------------------
 ; Transient variables.
@@ -1521,27 +1802,22 @@ CorrectionNeeded     db 0
 DetectStatus         db 0
 ForegroundResult     db 0
 
-MsgTitle:
-        db 13,10,'ASPECT - dynamic resident aspect-ratio corrector',13,10,0
-MsgBar:
-        db 'Graphics MMIO BAR0: ',0
 MsgDetected:
         db 'Detected output resolution: ',0
-MsgAspectWindow:
-        db 'Calculated 4:3 window: ',0
+MsgTargetWindow:
+        db 'Selected target window: ',0
 MsgAt:
         db ' at ',0
 MsgAlready43:
-        db 'The current BIOS output path is already 4:3; no TSR hook was installed.',13,10,0
-MsgInstalled:
-        db 'Installed. Correction is applied only when the BIOS restores the',13,10
-        db 'same widescreen fitter destination detected at installation.',13,10
-        db 'Mode-dependent or already-correct external output paths are left untouched.',13,10
-        db 'Use /D to deactivate; use /E to re-enable; /U physically unloads.',13,10,0
+        db 'ASPECT: already 4:3; not installed.',13,10,0
+MsgInstalledAspect:
+        db 'ASPECT: installed (aspect mode).',13,10,0
+MsgInstalledCenter:
+        db 'ASPECT: installed (centered mode).',13,10,0
 MsgGeometryFail:
         db 'Unable to detect or program a valid active fitter destination.',13,10,0
 MsgAlready:
-        db 'ASPECT is already installed.',13,10,0
+        db 'ASPECT: already installed.',13,10,0
 MsgPciFail:
         db 'PCI BIOS BAR0 read failed.',13,10,0
 MsgBarFail:
@@ -1551,23 +1827,19 @@ MsgNoXms:
 MsgA20Fail:
         db 'XMS could not globally enable A20.',13,10,0
 MsgUninstalled:
-        db 'ASPECT was unloaded successfully.',13,10,0
+        db 'ASPECT: unloaded.',13,10,0
 MsgDisabledRestored:
-        db 'ASPECT correction deactivated and the original fitter state restored.',13,10
-        db 'The TSR remains resident. Use ASPECT /E to re-enable or /U to unload.',13,10,0
+        db 'ASPECT: disabled.',13,10,0
 MsgDisabledOnly:
-        db 'ASPECT correction deactivated.',13,10
-        db 'Current fitter state was left untouched because it was not ASPECT''s applied state.',13,10
-        db 'The TSR remains resident. Use ASPECT /E to re-enable or /U to unload.',13,10,0
+        db 'ASPECT: disabled (output unchanged).',13,10,0
 MsgAlreadyDisabled:
-        db 'ASPECT correction is already disabled.',13,10,0
+        db 'ASPECT: already disabled.',13,10,0
 MsgEnabledApplied:
-        db 'ASPECT correction enabled and applied to the current output.',13,10,0
+        db 'ASPECT: enabled.',13,10,0
 MsgEnabledPending:
-        db 'ASPECT correction enabled.',13,10
-        db 'The current output was left untouched; correction will be applied when the BIOS restores the installation fitter size.',13,10,0
+        db 'ASPECT: enabled.',13,10,0
 MsgAlreadyEnabled:
-        db 'ASPECT correction is already enabled.',13,10,0
+        db 'ASPECT: already enabled.',13,10,0
 MsgWriteFailed:
         db 'ERROR: fitter write/readback verification failed.',13,10
         db 'ASPECT disabled further correction writes. Reboot before trying again.',13,10,0
@@ -1578,18 +1850,22 @@ MsgBusy:
         db 'ERROR: ASPECT is busy handling a video-mode change. Try the command again.',13,10,0
 MsgControlFail:
         db 'ERROR: ASPECT resident control protocol failed.',13,10,0
+MsgModeAspect:
+        db 'ASPECT: aspect mode.',13,10,0
+MsgModeCenter:
+        db 'ASPECT: centered mode.',13,10,0
 MsgUsage:
-        db 'Usage: ASPECT [/U | /D | /E]',13,10
-        db '  /U  physically unload the TSR',13,10
-        db '  /D  deactivate correction while remaining resident',13,10
-        db '  /E  re-enable correction',13,10,0
+        db 'Usage: ASPECT [/A|/C|/U|/D|/E]',13,10,0
 MsgNotInstalled:
-        db 'ASPECT is not installed.',13,10,0
+        db 'ASPECT: not installed.',13,10,0
 MsgUnsafeUnload:
-        db 'Cannot unload ASPECT: another TSR is installed after it.',13,10,0
+        db 'ERROR: cannot unload ASPECT; another TSR is installed after it.',13,10,0
+MsgUnloadRestoreFail:
+        db 'ERROR: ASPECT could not disable/restore safely; not unloaded.',13,10,0
 MsgFreeFailed:
-        db 'Interrupt vectors were restored, but DOS could not free the TSR block.',13,10,0
+        db 'ERROR: vectors restored but DOS could not free the ASPECT block.',13,10,0
 MsgCRLF:
+        db 13,10,0
         db 13,10,0
 
 ResidentSegment  dw 0
