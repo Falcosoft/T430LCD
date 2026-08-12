@@ -4,9 +4,22 @@
 
 The tools can also work with other Ivy Bridge/Intel HD Graphics 4000 laptops. The complete utility set has been confirmed working on a Lenovo IdeaPad Yoga 13 with a Core i5-3427U and an HP EliteBook Folio 9470m with a Core i5-3427U.
 
-<img width="1156" height="651" alt="doom_ar_corrected" src="https://github.com/user-attachments/assets/91dc5051-2819-43cd-a886-4baf82a154a3" />
-<img width="1156" height="651" alt="norton_ar_corrected" src="https://github.com/user-attachments/assets/07afd952-f327-4a82-98b7-af684d500083" />
 
+Aspect ratio corrected DOOM:
+
+<img width="1156" height="651" alt="doom_ar_corrected" src="https://github.com/user-attachments/assets/91dc5051-2819-43cd-a886-4baf82a154a3" />  
+
+Aspect ratio corrected Norton Commander:
+
+<img width="1156" height="651" alt="norton_ar_corrected" src="https://github.com/user-attachments/assets/07afd952-f327-4a82-98b7-af684d500083" />  
+
+Duke Nukem 3D in pixel perfect and centered 1024x768 mode on 1600x900 HD+ LCD:
+
+
+<img width="1902" height="1296" alt="duke3d_pixelperfect_centered" src="https://github.com/user-attachments/assets/b0154ca8-e5b0-4cd5-9168-cb689a2de39a" />  
+
+
+>
 T430LCD is an open-source collection of utilities that restores modern LCD functionality when running real MS-DOS on a Lenovo ThinkPad T430 with Intel HD Graphics 4000 (Ivy Bridge).
 
 The project provides:
