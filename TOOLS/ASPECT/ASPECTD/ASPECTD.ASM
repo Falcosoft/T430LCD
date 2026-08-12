@@ -1,8 +1,9 @@
 ; ASPECTD.ASM
-; Lenovo ThinkPad T430 / Intel HD Graphics 4000
-; ASPECTD 1.0 - resident DPMI aspect-ratio corrector
+; T430LCD 2.3 - ASPECTD
+; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
+; Resident DPMI aspect-ratio / pixel-perfect centered display corrector.
 ;
-; Final DPMI release derived from the hardware-verified resident prototype.
+; Final hardware-verified DPMI counterpart of ASPECT.
 ;
 ; Target environment:
 ;   JEMMEX/JEMM386 active
@@ -10,10 +11,12 @@
 ;   VCPI disabled if required by other software (for example VSBHDA)
 ;
 ; Commands:
-;   ASPECTD       install, or show resident state when already installed
-;   ASPECTD /U    deactivate correction (resident DPMI client stays loaded)
-;   ASPECTD /D    same as /U
-;   ASPECTD /E    re-enable correction
+;   ASPECTD        install with aspect-ratio correction, or show state
+;   ASPECTD /A     install/select aspect-ratio correction
+;   ASPECTD /C     install/select pixel-perfect centered mode
+;   ASPECTD /U     deactivate correction (resident DPMI client stays loaded)
+;   ASPECTD /D     same as /U
+;   ASPECTD /E     re-enable the selected policy
 ;
 ; /U deliberately means "deactivate" rather than physical unload. HDPMI32
 ; does not provide a documented safe way to destroy this resident client
@@ -23,7 +26,7 @@
 ;   - watches INT 10h AH=00h legacy VGA mode sets
 ;   - watches INT 10h AX=4F02h VBE mode sets
 ;   - calls original BIOS first
-;   - leaves native-resolution VBE modes full-screen
+;   - applies the selected policy to successful VBE modes, including native
 ;   - corrects only when BIOS restores installation PF_A_SIZE
 ;   - writes ONLY PF_A_POS followed by PF_A_SIZE
 ;   - verifies both writes
@@ -45,10 +48,9 @@ include T430LCD.INC
 PF_PAGE_OFFSET      equ 068000h
 PF_A_POS_PAGE       equ (PF_A_POS_OFFSET-PF_PAGE_OFFSET)
 PF_A_SIZE_PAGE      equ (PF_A_SIZE_OFFSET-PF_PAGE_OFFSET)
+PIPE_PAGE_OFFSET    equ 060000h
+PIPE_A_SRC_PAGE     equ 001Ch
 MAP_SIZE            equ 1000h
-
-VBE_MODE_INFO_XRES  equ 12h
-VBE_MODE_INFO_YRES  equ 14h
 
 ; Plain ASPECT uses FEC0/FEC1.
 MUX_PRESENT          equ 0FEC2h
@@ -66,10 +68,16 @@ STATE_ENABLED        equ 00h
 STATE_USER_DISABLED  equ 01h
 STATE_WRITE_FAILED   equ 02h
 
+; Display policies.
+POLICY_ASPECT        equ 00h
+POLICY_CENTER        equ 01h
+
 ; Resident callback commands.
 CMD_MODE             equ 00h
 CMD_DISABLE          equ 01h
 CMD_ENABLE           equ 02h
+CMD_ASPECT           equ 03h
+CMD_CENTER           equ 04h
 
 ; Control result codes returned in BL by MUX_CONTROL.
 CTL_DISABLED_RESTORED equ 01h
@@ -80,14 +88,19 @@ CTL_ENABLED_PENDING  equ 05h
 CTL_ALREADY_ENABLED  equ 06h
 CTL_WRITE_FAILED     equ 07h
 CTL_BUSY             equ 08h
-CTL_LOCKED           equ 09h
-CTL_BAD_COMMAND      equ 0FFh
+CTL_LOCKED            equ 09h
+CTL_POLICY_APPLIED    equ 0Ah
+CTL_POLICY_PENDING    equ 0Bh
+CTL_POLICY_SELECTED   equ 0Ch
+CTL_BAD_COMMAND       equ 0FFh
 
 ; Installer command values.
-ARG_DEFAULT          equ 00h
-ARG_DISABLE          equ 01h
-ARG_ENABLE           equ 02h
-ARG_INVALID          equ 0FFh
+ARG_DEFAULT           equ 00h
+ARG_DISABLE           equ 01h
+ARG_ENABLE            equ 02h
+ARG_ASPECT            equ 03h
+ARG_CENTER            equ 04h
+ARG_INVALID           equ 0FFh
 
 ; DPMI real-mode register structure offsets.
 RM_EDI               equ 00h
@@ -113,6 +126,7 @@ HDPMI_PRIVATE_PARAS  equ 0020h
 
 ; ResidentInfo returned by INT 2Fh AX=FEC3h.
 RI_STATE              equ 00h
+RI_POLICY             equ 01h
 RI_RES_PARAS          equ 02h
 
 start:
@@ -156,6 +170,10 @@ MuxControl:
         je      MuxControlValid
         cmp     bl,CMD_ENABLE
         je      MuxControlValid
+        cmp     bl,CMD_ASPECT
+        je      MuxControlValid
+        cmp     bl,CMD_CENTER
+        je      MuxControlValid
 
         mov     ax,MUX_CONTROL_REPLY
         mov     bl,CTL_BAD_COMMAND
@@ -195,13 +213,13 @@ HookLegacy:
         cmp     byte ptr cs:[Busy],0
         jne     HookChainDirect
         mov     byte ptr cs:[ModeSetKind],1
+        mov     byte ptr cs:[RequestedLegacyMode],al
         jmp     HookBegin
 
 HookVbe:
         cmp     byte ptr cs:[Busy],0
         jne     HookChainDirect
         mov     byte ptr cs:[ModeSetKind],2
-        mov     word ptr cs:[RequestedVbeMode],bx
 
 HookBegin:
         mov     byte ptr cs:[Busy],1
@@ -221,30 +239,11 @@ HookBegin:
         cmp     byte ptr cs:[ModeSetKind],2
         jne     HookCallCallback
 
-        ; Failed VBE mode set: leave BIOS result untouched.
+        ; Failed VBE mode set: leave BIOS result untouched. Successful VBE
+        ; modes use the selected policy exactly like legacy modes: /A can
+        ; correct a native-resolution mode, while /C naturally stays 1:1.
         cmp     ax,004Fh
         jne     HookRestore
-
-        ; Query requested VBE mode through the ORIGINAL BIOS handler.
-        mov     ax,cs
-        mov     es,ax
-        mov     di,offset VbeModeInfo
-        mov     cx,word ptr cs:[RequestedVbeMode]
-        and     cx,3FFFh
-        mov     ax,4F01h
-        pushf
-        call    dword ptr cs:[OldInt10]
-        cmp     ax,004Fh
-        jne     HookCallCallback
-
-        ; Native output mode: deliberately leave full-screen.
-        mov     dx,word ptr cs:[NativeWidth]
-        cmp     word ptr cs:[VbeModeInfo+VBE_MODE_INFO_XRES],dx
-        jne     HookCallCallback
-
-        mov     dx,word ptr cs:[NativeHeight]
-        cmp     word ptr cs:[VbeModeInfo+VBE_MODE_INFO_YRES],dx
-        je      HookRestore
 
 HookCallCallback:
         mov     byte ptr cs:[ControlCommand],CMD_MODE
@@ -281,6 +280,10 @@ CallbackProc:
         je      CallbackDisable
         cmp     al,CMD_ENABLE
         je      CallbackEnable
+        cmp     al,CMD_ASPECT
+        je      CallbackSelectAspect
+        cmp     al,CMD_CENTER
+        je      CallbackSelectCenter
 
 ; Normal mode-change correction.
 CallbackMode:
@@ -292,7 +295,9 @@ CallbackMode:
         cmp     eax,dword ptr gs:[OriginalSize]
         jne     CallbackReturn
 
-        call    CallbackApplyAspect
+        call    CallbackPrepareTarget
+        jc      CallbackReturn
+        call    CallbackApplyTarget
         jnc     CallbackReturn
 
         ; A failed verification permanently locks correction until reboot.
@@ -320,14 +325,14 @@ CallbackDisableActive:
         mov     byte ptr gs:[CorrectionState],STATE_USER_DISABLED
 
         ; Restore the installation fitter state only when the CURRENT state is
-        ; exactly ASPECTD's own applied 4:3 state. If an external path or BIOS
+        ; exactly ASPECTD's own applied state. If an external path or BIOS
         ; has changed it, leave that state untouched.
         mov     eax,dword ptr fs:[PF_A_POS_PAGE]
-        cmp     eax,dword ptr gs:[AspectPos]
+        cmp     eax,dword ptr gs:[AppliedPos]
         jne     CallbackDisableNoRestore
 
         mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
-        cmp     eax,dword ptr gs:[AspectSize]
+        cmp     eax,dword ptr gs:[AppliedSize]
         jne     CallbackDisableNoRestore
 
         call    CallbackRestoreOriginal
@@ -361,7 +366,9 @@ CallbackEnable:
         cmp     eax,dword ptr gs:[OriginalSize]
         jne     CallbackEnablePending
 
-        call    CallbackApplyAspect
+        call    CallbackPrepareTarget
+        jc      CallbackEnablePending
+        call    CallbackApplyTarget
         jnc     CallbackEnableApplied
 
         mov     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
@@ -383,6 +390,58 @@ CallbackEnableAlready:
 
 CallbackEnableLocked:
         mov     byte ptr gs:[ControlResult],CTL_LOCKED
+        jmp     CallbackReturn
+
+; /A or /C - select policy. Immediate application is allowed only when the
+; current fitter is the original fixed raster or exactly ASPECTD's own last
+; applied state. Otherwise the new policy is remembered for a later mode set.
+; Keep /A and /C as explicit entry paths so runtime aspect selection cannot be
+; confused with the centered command.
+CallbackSelectAspect:
+        cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        je      CallbackSelectLocked
+        mov     byte ptr gs:[CurrentPolicy],POLICY_ASPECT
+        jmp     short CallbackSelectState
+
+CallbackSelectCenter:
+        cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        je      CallbackSelectLocked
+        mov     byte ptr gs:[CurrentPolicy],POLICY_CENTER
+
+CallbackSelectState:
+        cmp     byte ptr gs:[CorrectionState],STATE_ENABLED
+        jne     CallbackSelectDisabled
+
+        mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
+        cmp     eax,dword ptr gs:[OriginalSize]
+        je      CallbackSelectApply
+        cmp     eax,dword ptr gs:[AppliedSize]
+        jne     CallbackSelectPending
+        mov     eax,dword ptr fs:[PF_A_POS_PAGE]
+        cmp     eax,dword ptr gs:[AppliedPos]
+        jne     CallbackSelectPending
+
+CallbackSelectApply:
+        call    CallbackPrepareTarget
+        jc      CallbackSelectPending
+        call    CallbackApplyTarget
+        jnc     CallbackSelectApplied
+
+        mov     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        call    CallbackRestoreOriginal
+        mov     byte ptr gs:[ControlResult],CTL_WRITE_FAILED
+        jmp     CallbackReturn
+CallbackSelectApplied:
+        mov     byte ptr gs:[ControlResult],CTL_POLICY_APPLIED
+        jmp     CallbackReturn
+CallbackSelectPending:
+        mov     byte ptr gs:[ControlResult],CTL_POLICY_PENDING
+        jmp     CallbackReturn
+CallbackSelectDisabled:
+        mov     byte ptr gs:[ControlResult],CTL_POLICY_SELECTED
+        jmp     CallbackReturn
+CallbackSelectLocked:
+        mov     byte ptr gs:[ControlResult],CTL_LOCKED
 
 ; Return from DPMI callback to the real-mode FAR CALL site.
 CallbackReturn:
@@ -400,31 +459,126 @@ CallbackReturn:
 
 ; --------------------------------------------------------------------------
 ; Callback MMIO helpers.
-; CF clear = success, CF set = readback verification failure.
 ; --------------------------------------------------------------------------
 
-CallbackApplyAspect proc near
+; Prepare the target for the currently selected policy.
+; /A copies the static 4:3 geometry. /C reads Pipe A PIPESRC from the separate
+; mapped page and centers that exact source raster without fitter scaling.
+; CF clear = valid target; CF set = source is invalid/larger than native raster.
+CallbackPrepareTarget proc near
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_CENTER
+        je      CallbackPrepareCenter
+
         mov     eax,dword ptr gs:[AspectPos]
+        mov     dword ptr gs:[AppliedPos],eax
+        mov     eax,dword ptr gs:[AspectSize]
+        mov     dword ptr gs:[AppliedSize],eax
+        clc
+        ret
+
+CallbackPrepareCenter:
+        push    bx
+        push    cx
+        push    dx
+
+        mov     ax,word ptr gs:[PipeSelector]
+        mov     fs,ax
+        mov     eax,dword ptr fs:[PIPE_A_SRC_PAGE]
+        mov     dword ptr gs:[PipeSourceTemp],eax
+        mov     ax,word ptr gs:[MmioSelector]
+        mov     fs,ax
+        mov     eax,dword ptr gs:[PipeSourceTemp]
+
+        mov     dx,ax
+        shr     eax,16
+        inc     ax
+        inc     dx
+        test    ax,ax
+        jz      CallbackPrepareBad
+        test    dx,dx
+        jz      CallbackPrepareBad
+
+        ; The observed CGA 4-color and EGA 320x200x16 symptoms are consistent
+        ; with BIOS modes 04h/05h/0Dh reaching Pipe A as 320x400: vertical x2
+        ; already present, horizontal x2 absent. Correct only when that exact
+        ; geometry is observed; do not generalize to other 320-wide modes.
+        cmp     byte ptr gs:[ModeSetKind],1
+        jne     CallbackPrepareCenterSized
+        mov     bl,byte ptr gs:[RequestedLegacyMode]
+        and     bl,7Fh
+        cmp     bl,04h
+        je      CallbackPrepareLegacy320Check
+        cmp     bl,05h
+        je      CallbackPrepareLegacy320Check
+        cmp     bl,0Dh
+        jne     CallbackPrepareCenterSized
+CallbackPrepareLegacy320Check:
+        cmp     ax,320
+        jne     CallbackPrepareCenterSized
+        cmp     dx,400
+        jne     CallbackPrepareCenterSized
+        shl     ax,1
+
+CallbackPrepareCenterSized:
+        cmp     ax,word ptr gs:[NativeWidth]
+        ja      CallbackPrepareBad
+        cmp     dx,word ptr gs:[NativeHeight]
+        ja      CallbackPrepareBad
+
+        mov     bx,ax
+        mov     cx,dx
+
+        mov     ax,word ptr gs:[NativeWidth]
+        sub     ax,bx
+        shr     ax,1
+        mov     dx,word ptr gs:[NativeHeight]
+        sub     dx,cx
+        shr     dx,1
+
+        movzx   eax,ax
+        shl     eax,16
+        mov     ax,dx
+        mov     dword ptr gs:[AppliedPos],eax
+
+        movzx   eax,bx
+        shl     eax,16
+        mov     ax,cx
+        mov     dword ptr gs:[AppliedSize],eax
+        pop     dx
+        pop     cx
+        pop     bx
+        clc
+        ret
+CallbackPrepareBad:
+        pop     dx
+        pop     cx
+        pop     bx
+        stc
+        ret
+CallbackPrepareTarget endp
+
+; Write the prepared target and verify both registers.
+CallbackApplyTarget proc near
+        mov     eax,dword ptr gs:[AppliedPos]
         mov     dword ptr fs:[PF_A_POS_PAGE],eax
 
-        mov     eax,dword ptr gs:[AspectSize]
+        mov     eax,dword ptr gs:[AppliedSize]
         mov     dword ptr fs:[PF_A_SIZE_PAGE],eax
 
         mov     eax,dword ptr fs:[PF_A_POS_PAGE]
-        cmp     eax,dword ptr gs:[AspectPos]
+        cmp     eax,dword ptr gs:[AppliedPos]
         jne     CallbackApplyBad
 
         mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
-        cmp     eax,dword ptr gs:[AspectSize]
+        cmp     eax,dword ptr gs:[AppliedSize]
         jne     CallbackApplyBad
 
         clc
         ret
-
 CallbackApplyBad:
         stc
         ret
-CallbackApplyAspect endp
+CallbackApplyTarget endp
 
 CallbackRestoreOriginal proc near
         mov     eax,dword ptr gs:[OriginalPos]
@@ -459,15 +613,19 @@ CallbackPtr         dw 0,0            ; offset, segment
 
 DataSelector        dw 0
 MmioSelector        dw 0
+PipeSelector        dw 0
 
 OriginalPos         dd 0
 OriginalSize        dd 0
 AspectPos           dd 0
 AspectSize          dd 0
+AppliedPos          dd 0
+AppliedSize         dd 0
+PipeSourceTemp      dd 0
 
 NativeWidth         dw 0
 NativeHeight        dw 0
-RequestedVbeMode    dw 0
+RequestedLegacyMode db 0
 
 ModeSetKind         db 0
 Busy                db 0
@@ -477,14 +635,11 @@ ControlResult       db 0
 ; Public resident state.
 ResidentInfo label byte
 CorrectionState     db STATE_ENABLED
-                    db 0              ; alignment/pad
+CurrentPolicy       db POLICY_ASPECT
 ResidentParas       dw 0
 
 ; DPMI callback register image must remain valid for callback lifetime.
 CallbackRmcs        db RM_STRUCT_SIZE dup (0)
-
-; VBE 2.0 ModeInfoBlock.
-VbeModeInfo         db 256 dup (0)
 
 ; DOS TSR request RMCS. DPMI 0300h + DOS AH=31h intentionally never returns.
 TsrRmcs             db RM_STRUCT_SIZE dup (0)
@@ -529,8 +684,13 @@ CommandParsed:
         cmp     ax,MUX_PRESENT_REPLY
         je      ResidentCommand
 
-        ; /U, /D and /E require an existing resident copy.
+        ; Default, /A and /C may start a new resident copy. /U, /D and /E
+        ; require an existing resident copy.
         cmp     byte ptr [StartupCommand],ARG_DEFAULT
+        je      CheckPlainAspectConflict
+        cmp     byte ptr [StartupCommand],ARG_ASPECT
+        je      CheckPlainAspectConflict
+        cmp     byte ptr [StartupCommand],ARG_CENTER
         je      CheckPlainAspectConflict
 
         mov     dx,offset MsgNotResident
@@ -547,6 +707,10 @@ ResidentCommand:
 
         cmp     byte ptr [StartupCommand],ARG_ENABLE
         je      SendEnable
+        cmp     byte ptr [StartupCommand],ARG_ASPECT
+        je      SendAspect
+        cmp     byte ptr [StartupCommand],ARG_CENTER
+        je      SendCenter
 
         mov     dx,offset MsgUsage
         call    PrintZ
@@ -575,6 +739,26 @@ SendEnable:
         mov     ax,4C00h
         int     21h
 
+SendAspect:
+        mov     ax,MUX_CONTROL
+        mov     bl,CMD_ASPECT
+        int     2Fh
+        cmp     ax,MUX_CONTROL_REPLY
+        jne     ControlProtocolFail
+        call    PrintPolicyResult
+        mov     ax,4C00h
+        int     21h
+
+SendCenter:
+        mov     ax,MUX_CONTROL
+        mov     bl,CMD_CENTER
+        int     2Fh
+        cmp     ax,MUX_CONTROL_REPLY
+        jne     ControlProtocolFail
+        call    PrintPolicyResult
+        mov     ax,4C00h
+        int     21h
+
 ShowResidentState:
         call    PrintResidentState
         mov     ax,4C00h
@@ -599,9 +783,11 @@ CheckPlainAspectConflict:
         int     21h
 
 BeginInstall:
-        mov     dx,offset MsgTitle
-        call    PrintZ
-
+        mov     byte ptr [CurrentPolicy],POLICY_ASPECT
+        cmp     byte ptr [StartupCommand],ARG_CENTER
+        jne     BeginInstallPolicySet
+        mov     byte ptr [CurrentPolicy],POLICY_CENTER
+BeginInstallPolicySet:
         ; Intel graphics BAR0, PCI 00:02.0 config offset 10h.
         mov     di,10h
         call    PciReadDword
@@ -616,6 +802,9 @@ BeginInstall:
         mov     eax,dword ptr [MmioBase]
         add     eax,PF_PAGE_OFFSET
         mov     dword ptr [MapPhys],eax
+        mov     eax,dword ptr [MmioBase]
+        add     eax,PIPE_PAGE_OFFSET
+        mov     dword ptr [PipeMapPhys],eax
 
         ; Detect 32-bit DPMI host and obtain initial switch entry.
         mov     ax,1687h
@@ -688,6 +877,40 @@ BeginInstall:
         int     31h
         jc      SelectorSetupFail
 
+        ; Map Pipe A timing/source page used by /C. It is retained so policy
+        ; switching to centered mode remains possible after installation.
+        mov     ax,0800h
+        mov     bx,word ptr [PipeMapPhys+2]
+        mov     cx,word ptr [PipeMapPhys]
+        xor     si,si
+        mov     di,MAP_SIZE
+        int     31h
+        jc      MapFail
+        mov     word ptr [PipeMapLinear],cx
+        mov     word ptr [PipeMapLinear+2],bx
+        mov     byte ptr [PipeMapActive],1
+
+        mov     ax,0000h
+        mov     cx,0001h
+        int     31h
+        jc      SelectorAllocFail
+        mov     word ptr [PipeSelector],ax
+        mov     byte ptr [PipeSelectorActive],1
+
+        mov     bx,word ptr [PipeSelector]
+        mov     cx,word ptr [PipeMapLinear+2]
+        mov     dx,word ptr [PipeMapLinear]
+        mov     ax,0007h
+        int     31h
+        jc      SelectorSetupFail
+
+        mov     bx,word ptr [PipeSelector]
+        xor     cx,cx
+        mov     dx,MAP_SIZE-1
+        mov     ax,0008h
+        int     31h
+        jc      SelectorSetupFail
+
         ; Capture exact installation fitter state.
         mov     ax,word ptr [MmioSelector]
         mov     fs,ax
@@ -714,6 +937,8 @@ BeginInstall:
         call    PrintDec16
         call    PrintCRLF
 
+        cmp     byte ptr [CurrentPolicy],POLICY_CENTER
+        je      GeometryNeedsInstall
         cmp     byte ptr [CorrectionNeeded],0
         jne     GeometryNeedsInstall
 
@@ -722,32 +947,31 @@ BeginInstall:
         jmp     ExitPm0
 
 GeometryNeedsInstall:
-        mov     dx,offset MsgTarget
-        call    PrintZ
-        mov     ax,word ptr [AspectWidth]
-        call    PrintDec16
-        mov     dl,'x'
-        call    PutCh
-        mov     ax,word ptr [AspectHeight]
-        call    PrintDec16
-        mov     dx,offset MsgAt
-        call    PrintZ
-        mov     ax,word ptr [AspectX]
-        call    PrintDec16
-        mov     dl,','
-        call    PutCh
-        mov     ax,word ptr [AspectY]
-        call    PrintDec16
-        call    PrintCRLF
-
         ; Apply once to the current output before installing hooks.
         call    ApplyInitialAspect
         jc      InitialWriteFail
 
+        mov     dx,offset MsgTarget
+        call    PrintZ
+        mov     ax,word ptr [AppliedSize+2]
+        call    PrintDec16
+        mov     dl,'x'
+        call    PutCh
+        mov     ax,word ptr [AppliedSize]
+        call    PrintDec16
+        mov     dx,offset MsgAt
+        call    PrintZ
+        mov     ax,word ptr [AppliedPos+2]
+        call    PrintDec16
+        mov     dl,','
+        call    PutCh
+        mov     ax,word ptr [AppliedPos]
+        call    PrintDec16
+        call    PrintCRLF
+
         ; Allocate protected-mode callback.
         push    ds
         push    es
-
         mov     ax,ds
         mov     es,ax
         xor     edi,edi
@@ -826,15 +1050,13 @@ GeometryNeedsInstall:
         shr     dx,cl
         mov     word ptr [ResidentParas],dx
 
-        mov     dx,offset MsgResident
-        call    PrintZ
-        mov     ax,word ptr [ResidentParas]
-        shl     ax,4
-        call    PrintDec16
-        mov     dx,offset MsgBytes
-        call    PrintZ
-
-        mov     dx,offset MsgInstalled
+        cmp     byte ptr [CurrentPolicy],POLICY_CENTER
+        je      InstallPrintCenter
+        mov     dx,offset MsgInstalledAspect
+        jmp     short InstallPrintDone
+InstallPrintCenter:
+        mov     dx,offset MsgInstalledCenter
+InstallPrintDone:
         call    PrintZ
 
         ; Stay resident through DOS AH=31h invoked by DPMI 0300h.
@@ -889,6 +1111,16 @@ ComputeAspectGeometry proc near
         jne     ComputeNeedsCorrection
 
         mov     byte ptr [CorrectionNeeded],0
+        mov     eax,dword ptr [OriginalPos]
+        mov     dword ptr [AspectPos],eax
+        mov     eax,dword ptr [OriginalSize]
+        mov     dword ptr [AspectSize],eax
+        mov     ax,word ptr [NativeWidth]
+        mov     word ptr [AspectWidth],ax
+        mov     ax,word ptr [NativeHeight]
+        mov     word ptr [AspectHeight],ax
+        mov     word ptr [AspectX],0
+        mov     word ptr [AspectY],0
         clc
         ret
 
@@ -955,31 +1187,27 @@ ComputeAspectGeometry endp
 ; --------------------------------------------------------------------------
 
 ApplyInitialAspect proc near
+        push    gs
+        mov     ax,ds
+        mov     gs,ax
         mov     ax,word ptr [MmioSelector]
         mov     fs,ax
 
-        mov     eax,dword ptr [AspectPos]
-        mov     dword ptr fs:[PF_A_POS_PAGE],eax
-
-        mov     eax,dword ptr [AspectSize]
-        mov     dword ptr fs:[PF_A_SIZE_PAGE],eax
-
-        mov     eax,dword ptr fs:[PF_A_POS_PAGE]
-        cmp     eax,dword ptr [AspectPos]
-        jne     InitialApplyBad
-
-        mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
-        cmp     eax,dword ptr [AspectSize]
-        jne     InitialApplyBad
+        call    CallbackPrepareTarget
+        jc      InitialApplyBad
+        call    CallbackApplyTarget
+        jc      InitialApplyBad
 
         xor     ax,ax
         mov     fs,ax
+        pop     gs
         clc
         ret
 
 InitialApplyBad:
         xor     ax,ax
         mov     fs,ax
+        pop     gs
         call    RestoreOriginalFitter
         stc
         ret
@@ -997,7 +1225,6 @@ RestoreOriginalFitter proc near
 
         mov     eax,dword ptr [OriginalSize]
         mov     dword ptr fs:[PF_A_SIZE_PAGE],eax
-
         xor     ax,ax
         mov     fs,ax
 
@@ -1021,6 +1248,8 @@ PrintResidentState proc near
         mov     al,byte ptr es:[di+RI_STATE]
         mov     byte ptr [StatusState],al
 
+        mov     al,byte ptr es:[di+RI_POLICY]
+        mov     byte ptr [StatusPolicy],al
         mov     ax,word ptr es:[di+RI_RES_PARAS]
         mov     word ptr [StatusParas],ax
 
@@ -1046,6 +1275,17 @@ PrintStateDisabled:
         call    PrintZ
 
 PrintStateMemory:
+        mov     dx,offset MsgResidentPolicy
+        call    PrintZ
+        cmp     byte ptr [StatusPolicy],POLICY_CENTER
+        je      PrintStateCenter
+        mov     dx,offset MsgPolicyAspect
+        call    PrintZ
+        jmp     short PrintStatePolicyDone
+PrintStateCenter:
+        mov     dx,offset MsgPolicyCenter
+        call    PrintZ
+PrintStatePolicyDone:
         mov     dx,offset MsgResidentMemory
         call    PrintZ
         mov     ax,word ptr [StatusParas]
@@ -1164,9 +1404,49 @@ PrintBusy2:
         ret
 PrintEnableResult endp
 
+PrintPolicyResult proc near
+        cmp     bl,CTL_POLICY_APPLIED
+        je      PrintPolicyNormal
+        cmp     bl,CTL_POLICY_PENDING
+        je      PrintPolicyNormal
+        cmp     bl,CTL_POLICY_SELECTED
+        je      PrintPolicyNormal
+        cmp     bl,CTL_WRITE_FAILED
+        je      PrintPolicyWriteFail
+        cmp     bl,CTL_LOCKED
+        je      PrintPolicyLocked
+        cmp     bl,CTL_BUSY
+        je      PrintPolicyBusy
+        mov     dx,offset MsgControlFail
+        call    PrintZ
+        ret
+PrintPolicyNormal:
+        cmp     byte ptr [StartupCommand],ARG_CENTER
+        je      PrintPolicyCenterOut
+        mov     dx,offset MsgModeAspect
+        call    PrintZ
+        ret
+PrintPolicyCenterOut:
+        mov     dx,offset MsgModeCenter
+        call    PrintZ
+        ret
+PrintPolicyWriteFail:
+        mov     dx,offset MsgWriteFailed
+        call    PrintZ
+        ret
+PrintPolicyLocked:
+        mov     dx,offset MsgLocked
+        call    PrintZ
+        ret
+PrintPolicyBusy:
+        mov     dx,offset MsgBusy
+        call    PrintZ
+        ret
+PrintPolicyResult endp
+
 ; --------------------------------------------------------------------------
 ; Command parser.
-; AL = ARG_DEFAULT / ARG_DISABLE / ARG_ENABLE / ARG_INVALID.
+; AL = ARG_DEFAULT / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_CENTER / ARG_INVALID.
 ; --------------------------------------------------------------------------
 
 ParseCommand proc near
@@ -1212,6 +1492,10 @@ ParseLetter:
         je      ParseDisable
         cmp     al,'E'
         je      ParseEnable
+        cmp     al,'A'
+        je      ParseAspect
+        cmp     al,'C'
+        je      ParseCenter
         jmp     ParseInvalid
 
 ParseDisable:
@@ -1220,6 +1504,14 @@ ParseDisable:
 
 ParseEnable:
         mov     al,ARG_ENABLE
+        jmp     ParseDone
+
+ParseAspect:
+        mov     al,ARG_ASPECT
+        jmp     ParseDone
+
+ParseCenter:
+        mov     al,ARG_CENTER
         jmp     ParseDone
 
 ParseDefault:
@@ -1298,6 +1590,13 @@ CleanupDpmi proc near
         mov     byte ptr [CallbackActive],0
 
 CleanupNoCallback:
+        cmp     byte ptr [PipeSelectorActive],0
+        je      CleanupNoPipeSelector
+        mov     bx,word ptr [PipeSelector]
+        mov     ax,0001h
+        int     31h
+        mov     byte ptr [PipeSelectorActive],0
+CleanupNoPipeSelector:
         cmp     byte ptr [SelectorActive],0
         je      CleanupNoSelector
 
@@ -1307,6 +1606,14 @@ CleanupNoCallback:
         mov     byte ptr [SelectorActive],0
 
 CleanupNoSelector:
+        cmp     byte ptr [PipeMapActive],0
+        je      CleanupNoPipeMap
+        mov     bx,word ptr [PipeMapLinear+2]
+        mov     cx,word ptr [PipeMapLinear]
+        mov     ax,0801h
+        int     31h
+        mov     byte ptr [PipeMapActive],0
+CleanupNoPipeMap:
         cmp     byte ptr [MapActive],0
         je      CleanupDone
 
@@ -1497,7 +1804,6 @@ PutCh proc near
         pop     ax
         ret
 PutCh endp
-
 PrintZ proc near
         push    ax
         push    si
@@ -1609,6 +1915,8 @@ DpmiEntry           dd 0
 MmioBase            dd 0
 MapPhys             dd 0
 MapLinear           dd 0
+PipeMapPhys         dd 0
+PipeMapLinear       dd 0
 
 PrivateParas        dw 0
 CallbackSeg         dw 0
@@ -1623,59 +1931,60 @@ AspectY             dw 0
 
 StatusParas         dw 0
 StatusState         db 0
+StatusPolicy        db 0
 
 StartupCommand      db ARG_DEFAULT
 CorrectionNeeded    db 0
 MapActive           db 0
 SelectorActive      db 0
+PipeMapActive       db 0
+PipeSelectorActive  db 0
 CallbackActive      db 0
 Hook10Active        db 0
 Hook2FActive        db 0
 
-MsgTitle:
-        db 'ASPECTD 1.0 - DPMI aspect-ratio corrector',13,10,0
-
 MsgDetected:
         db 'Detected output: ',0
 MsgTarget:
-        db '4:3 window     : ',0
+        db 'Selected window: ',0
 MsgAt:
         db ' at ',0
-MsgResident:
-        db 'Resident memory: ',0
-MsgBytes:
-        db ' bytes',13,10,0
-MsgInstalled:
-        db 'ASPECTD installed and enabled.',13,10
-        db 'Use /U or /D to deactivate; use /E to re-enable.',13,10,0
+MsgInstalledAspect:
+        db 'ASPECTD: installed (aspect mode).',13,10,0
+MsgInstalledCenter:
+        db 'ASPECTD: installed (centered mode).',13,10,0
 
 MsgResidentPrefix:
-        db 'ASPECTD is resident: ',0
+        db 'ASPECTD: ',0
 MsgStateEnabled:
-        db 'ENABLED',13,10,0
+        db 'enabled',13,10,0
 MsgStateDisabled:
-        db 'DISABLED',13,10,0
+        db 'disabled',13,10,0
 MsgStateLocked:
-        db 'DISABLED (write-verification failure; reboot required)',13,10,0
+        db 'locked (reboot required)',13,10,0
+MsgResidentPolicy:
+        db 'Mode: ',0
+MsgPolicyAspect:
+        db 'aspect',13,10,0
+MsgPolicyCenter:
+        db 'centered',13,10,0
 MsgResidentMemory:
-        db 'Resident memory: ',0
+        db 'Resident: ',0
+MsgBytes:
+        db ' bytes',13,10,0
 
 MsgDisabledRestored:
-        db 'ASPECTD correction deactivated and the original fitter state restored.',13,10
-        db 'The DPMI client remains resident. Use ASPECTD /E to re-enable.',13,10,0
+        db 'ASPECTD: disabled.',13,10,0
 MsgDisabledOnly:
-        db 'ASPECTD correction deactivated.',13,10
-        db 'Current fitter state was left untouched because it was not ASPECTD''s applied state.',13,10
-        db 'The DPMI client remains resident. Use ASPECTD /E to re-enable.',13,10,0
+        db 'ASPECTD: disabled (output unchanged).',13,10,0
 MsgAlreadyDisabled:
-        db 'ASPECTD correction is already disabled.',13,10,0
+        db 'ASPECTD: already disabled.',13,10,0
 MsgEnabledApplied:
-        db 'ASPECTD correction enabled and applied to the current output.',13,10,0
+        db 'ASPECTD: enabled.',13,10,0
 MsgEnabledPending:
-        db 'ASPECTD correction enabled.',13,10
-        db 'The current output was left untouched; correction will be applied when the BIOS restores the installation fitter size.',13,10,0
+        db 'ASPECTD: enabled.',13,10,0
 MsgAlreadyEnabled:
-        db 'ASPECTD correction is already enabled.',13,10,0
+        db 'ASPECTD: already enabled.',13,10,0
 MsgWriteFailed:
         db 'ERROR: fitter write/readback verification failed.',13,10
         db 'ASPECTD disabled further correction writes. Reboot before trying again.',13,10,0
@@ -1686,15 +1995,17 @@ MsgBusy:
         db 'ERROR: ASPECTD is busy handling a video-mode change. Try the command again.',13,10,0
 
 MsgNotResident:
-        db 'ASPECTD is not resident.',13,10,0
+        db 'ASPECTD: not resident.',13,10,0
 MsgAspectConflict:
         db 'ERROR: ASPECT is already resident. Remove it before installing ASPECTD.',13,10,0
 MsgAlready43:
-        db 'Current output path is already exactly 4:3; ASPECTD was not installed.',13,10,0
+        db 'ASPECTD: already 4:3; not installed.',13,10,0
+MsgModeAspect:
+        db 'ASPECTD: aspect mode.',13,10,0
+MsgModeCenter:
+        db 'ASPECTD: centered mode.',13,10,0
 MsgUsage:
-        db 'Usage: ASPECTD [/U | /D | /E]',13,10
-        db '  /U, /D  deactivate correction (ASPECTD remains resident)',13,10
-        db '  /E      re-enable correction',13,10,0
+        db 'Usage: ASPECTD [/A|/C|/U|/D|/E]',13,10,0
 MsgControlFail:
         db 'ERROR: ASPECTD resident control protocol failed.',13,10,0
 
@@ -1732,6 +2043,7 @@ MsgTsrReturned:
         db 'ERROR: DOS TSR call unexpectedly returned; installation rolled back.',13,10,0
 
 MsgCRLF:
+        db 13,10,0
         db 13,10,0
 
 InstallerStack       db 512 dup (0)
