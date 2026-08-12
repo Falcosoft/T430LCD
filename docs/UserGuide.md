@@ -2,14 +2,22 @@
 
 ## 1. Introduction
 
-T430LCD addresses two practical Lenovo ThinkPad T430 problems under real DOS on physical hardware:
+T430LCD addresses practical LCD/display problems under real DOS on physical Intel hardware:
 
 1. restoring a preferred LCD brightness automatically at boot
-2. preventing legacy 4:3 DOS modes from being stretched across the internal widescreen LCD
+2. preventing legacy 4:3 DOS modes from being stretched across a widescreen LCD
+3. providing a pixel-perfect centered display mode for users who prefer the active source raster without additional fitter scaling
 
-The utilities communicate directly with Intel HD Graphics 4000 hardware. The primary development and validation platform is a physical ThinkPad T430.
+The primary development and validation platform is a physical Lenovo ThinkPad T430 with Intel HD Graphics 4000.
 
-T430LCD provides two MMIO access paths:
+T430LCD v2.3 gives ASPECT and ASPECTD two explicit display policies:
+
+- `/A` — centered 4:3 aspect-ratio correction
+- `/C` — pixel-perfect centered mode based on the active Intel display-pipe source raster
+
+With no argument, ASPECT and ASPECTD retain the historical behavior and use `/A`.
+
+The utilities use two MMIO access paths:
 
 - `BLCSET` and `ASPECT` use the direct plain-DOS protected-mode backend.
 - `BLCSETD` and `ASPECTD` use a 32-bit DPMI host and are intended for memory-manager environments such as the tested JEMM386/HDPMI32 configuration.
@@ -33,9 +41,20 @@ The complete T430LCD utility set has also been confirmed working on:
 - Lenovo IdeaPad Yoga 13 — Intel Core i5-3427U / Intel HD Graphics 4000 — internal 1600×900 LCD
 - HP EliteBook Folio 9470m — Intel Core i5-3427U / Intel HD Graphics 4000 — internal 1366×768 LCD
 
-These are community hardware confirmations. The Yoga 13 uses the same 1600×900 internal-panel geometry as the T430. On the 9470m, user feedback and screenshots confirm that ASPECT correctly produces a centered 1024×768 4:3 window at X=171, Y=0 from the 1366×768 panel.
+ASPECT has additionally been confirmed on:
 
-Detailed output-path/PFSNAP results for the two community-tested systems are not yet documented.
+- Dell Inspiron E5550 — Intel HD Graphics 5500 (Broadwell) — internal 1920×1080 LCD — ASPECT confirmed; BLCSET does not work
+
+These are community hardware confirmations. The Yoga 13 and EliteBook reports cover the complete utility set. The Dell Broadwell report is ASPECT-specific and should not be interpreted as brightness support because BLCSET was reported not to work. The detailed v2.3 `/C` regression matrix is from the primary ThinkPad T430.
+
+Confirmed `/A` geometry includes:
+
+| System | Fixed-raster destination | Corrected 4:3 window | Position |
+|--------|--------------------------|----------------------|----------|
+| ThinkPad T430 | 1600×900 | 1200×900 | X=200, Y=0 |
+| IdeaPad Yoga 13 | 1600×900 | 1200×900 | X=200, Y=0 |
+| EliteBook Folio 9470m | 1366×768 | 1024×768 | X=171, Y=0 |
+| Dell Inspiron E5550 / Intel HD 5500 | 1920×1080 | 1440×1080 | X=240, Y=0 |
 
 ### Software
 
@@ -122,6 +141,8 @@ BLCSET locates Intel BAR0, detects the maximum PWM value, clamps the request, wr
 
 Do not run BLCSET from an EMM386/JEMM386 virtual-8086 environment because its direct CR0/LGDT protected-mode transition is intentionally a plain-DOS path.
 
+BLCSET is not a generic Intel-generation brightness utility. In particular, it was reported not to work on the Broadwell Dell Inspiron E5550 / Intel HD Graphics 5500 system on which ASPECT itself does work.
+
 ### BLCSETD
 
 `BLCSETD` provides the same interactive PWM duty control through DPMI.
@@ -176,13 +197,82 @@ BLCINIT is normally loaded before EMM386/JEMM386, so no DPMI-specific BLCINIT va
 
 ## 6. ASPECT
 
-### Install
+ASPECT is the real-mode TSR for plain DOS.
+
+### Install with the default aspect policy
 
 ```dos
 ASPECT
 ```
 
-ASPECT is the real-mode TSR for plain DOS.
+No argument is equivalent to selecting `/A` at installation.
+
+### Select aspect-ratio correction
+
+```dos
+ASPECT /A
+```
+
+`/A` selects the existing centered 4:3 correction algorithm. When ASPECT is already resident, `/A` switches the current policy back to aspect correction.
+
+For a fixed-raster 1600×900 destination the calculated target is 1200×900 at X=200,Y=0. For 1366×768 it is 1024×768 at X=171,Y=0. A community Broadwell report confirms the same dynamic calculation on a 1920×1080 Dell Inspiron E5550 / Intel HD 5500, producing 1440×1080 at X=240,Y=0.
+
+Unlike older releases, v2.3 has no native-resolution VBE bypass. A successful native VBE mode is treated like any other compatible mode. Therefore a native 1600×900 VBE mode can be shown as 1200×900 centered when `/A` is selected.
+
+### Select pixel-perfect centered mode
+
+```dos
+ASPECT /C
+```
+
+`/C` selects pixel-perfect centered mode. For a compatible fixed-raster output, ASPECT reads Pipe A `PIPESRC` at `BAR0+6001Ch`, decodes the source dimensions and centers that raster directly inside the detected fitter destination:
+
+```text
+source width  = upper 16 bits + 1
+source height = lower 16 bits + 1
+X = (fixed width  - source width)  / 2
+Y = (fixed height - source height) / 2
+```
+
+No extra even rounding is applied in `/C`. If one unused pixel remains because of an odd difference, it is left on the right or bottom side so that the source dimensions remain exact.
+
+Examples on the 1600×900 T430 fixed-raster panel are:
+
+| Source raster | `/C` target | Position |
+|---------------|-------------|----------|
+| 720×400 | 720×400 | X=440, Y=250 |
+| 640×400 | 640×400 | X=480, Y=250 |
+| 640×480 | 640×480 | X=480, Y=210 |
+| 800×600 | 800×600 | X=400, Y=150 |
+| 1024×768 | 1024×768 | X=288, Y=66 |
+| 1600×900 | 1600×900 | X=0, Y=0 |
+
+The native 1600×900 case therefore becomes naturally pixel-perfect/full-screen in `/C`; no native-VBE special case is required.
+
+### Legacy CGA/EGA 320-wide exception
+
+Hardware testing found one deliberately narrow exception to direct `PIPESRC` centering. Standard BIOS modes:
+
+```text
+04h  CGA 320×200 4-color
+05h  CGA 320×200 4-color
+0Dh  EGA 320×200 16-color
+```
+
+can reach Pipe A in a 320×400 form where vertical doubling is already present but the horizontal doubling needed for correct centered display is absent.
+
+For those BIOS mode numbers only, and only when `PIPESRC` decodes to exactly 320×400, `/C` changes the target to 640×400. Only the width is doubled.
+
+This is intentionally not a generic 320-wide rule. Other 320×200 VGA modes worked without it, and a non-standard VGA-register-compatible 320×400×256 Fractint mode also worked correctly and remains untouched. Standard 640×200 and 640×350 legacy modes likewise worked without special handling.
+
+### Runtime policy switching
+
+`/A` and `/C` can be selected while ASPECT is resident. Immediate application is allowed only when ASPECT can prove that the fitter is either:
+
+- at the saved installation fixed-raster state, or
+- exactly at ASPECT's own last-applied position and size.
+
+If neither condition is true, the selected policy is remembered but the current output is not overwritten; ASPECT waits for a later compatible BIOS mode set.
 
 ### Deactivate without unloading
 
@@ -190,7 +280,7 @@ ASPECT is the real-mode TSR for plain DOS.
 ASPECT /D
 ```
 
-`/D` disables future aspect-ratio correction while leaving the TSR resident. If the current `PF_A_POS` and `PF_A_SIZE` exactly match ASPECT's own applied 4:3 state, ASPECT restores the installation-time fitter position and size. If the current fitter state belongs to another BIOS/output state, it is left untouched.
+`/D` disables future correction while leaving the TSR resident. If the current `PF_A_POS` and `PF_A_SIZE` exactly match ASPECT's own last-applied state, ASPECT restores the installation-time fitter position and size. If the current fitter state belongs to another BIOS/output state, it is left untouched.
 
 ### Re-enable
 
@@ -198,7 +288,7 @@ ASPECT /D
 ASPECT /E
 ```
 
-`/E` re-enables correction. If the current fitter size matches the installation-time fixed raster, correction is applied immediately. Otherwise ASPECT waits for a later BIOS mode set that restores the compatible fitter size.
+`/E` re-enables whichever policy (`/A` or `/C`) is currently selected. If the current fitter state is compatible, the target is applied immediately; otherwise ASPECT waits for a later compatible mode set.
 
 ### Physical unload
 
@@ -206,9 +296,11 @@ ASPECT /E
 ASPECT /U
 ```
 
-`/U` remains the true physical unload command.
+`/U` is the true physical unload command, but v2.3 first executes the same resident restore/deactivation operation used by `/D` while the MMIO engine and hooks are still available. Only after that operation reports a safe normal result does ASPECT restore interrupt vectors and free its memory.
 
-ASPECT unloads only when it is still the newest handler on both `INT 10h` and `INT 2Fh`. If another TSR hooked either interrupt afterward, ASPECT refuses to unload to avoid breaking the chain.
+If the restore/deactivation path reports a fitter verification failure, safety lock, busy state or control-protocol error, `/U` refuses to unload rather than discard a TSR whose display state may be uncertain.
+
+ASPECT still unloads only when it is the newest handler on both `INT 10h` and `INT 2Fh`. If another TSR hooked either interrupt afterward, ASPECT refuses to unload to avoid breaking the chain.
 
 ### AUTOEXEC.BAT example
 
@@ -218,31 +310,13 @@ C:\T430LCD\ASPECT.COM
 PATH C:\DOS;C:\UTIL
 ```
 
-### Internal LCD
+### Fixed-raster safety rule
 
-ASPECT calculates the largest centered 4:3 window dynamically from the detected fitter destination.
+After a watched BIOS mode change, ASPECT applies the selected policy only when the post-BIOS `PF_A_SIZE` equals the fixed-raster size captured at installation. This avoids disturbing external/mode-timed output paths whose fitter size changes with the mode.
 
-Confirmed internal-panel results are:
+For live `/A`↔`/C` switching, ASPECT also accepts the exact last-applied state as owned state.
 
-| System | Native fitter destination | Corrected 4:3 window | Position |
-|--------|---------------------------|------------------------|----------|
-| ThinkPad T430 | 1600×900 | 1200×900 | X=200, Y=0 |
-| IdeaPad Yoga 13 | 1600×900 | 1200×900 | X=200, Y=0 |
-| EliteBook Folio 9470m | 1366×768 | 1024×768 | X=171, Y=0 |
-
-The 9470m result is confirmed by user feedback and screenshots and demonstrates that ASPECT's geometry calculation is not tied to the T430's 1600×900 panel.
-
-### External analog VGA
-
-The BIOS generates mode-specific output timings, for example 720×400 text and 640×480 for mode 13h. ASPECT detects the changing destination and leaves it unchanged.
-
-### External DVI
-
-The tested DVI path already uses a 640×480 destination for legacy graphics modes. Since this is 4:3, ASPECT does not install a correction hook.
-
-### Native VESA modes
-
-A VESA mode matching the detected output dimensions remains full-screen.
+ASPECT writes only `PF_A_POS` followed by `PF_A_SIZE`. It never rewrites `PF_A_CTL`, `PF_A_VSCALE`, or `PF_A_HSCALE`. Pipe A `PIPESRC` is read only.
 
 ### Mode changes watched
 
@@ -251,69 +325,35 @@ INT 10h AH=00h
 INT 10h AX=4F02h
 ```
 
-### Decision logic
-
-At installation:
-
-```text
-read PF_A_SIZE
-
-if destination is 4:3:
-    do not install
-else:
-    save widescreen destination
-    calculate centered 4:3 window
-    install TSR
-```
-
-After each watched mode change:
-
-```text
-if native VESA mode:
-    do nothing
-else if current PF_A_SIZE equals saved widescreen size:
-    apply the calculated 4:3 window
-else:
-    leave BIOS programming untouched
-```
-
-ASPECT writes only `PF_A_POS` followed by `PF_A_SIZE`. It never rewrites `PF_A_CTL`, `PF_A_VSCALE`, or `PF_A_HSCALE`.
+A failed VBE `4F02h` call never triggers a fitting update.
 
 ## 7. ASPECTD
 
 ASPECTD is the DPMI counterpart of ASPECT for systems using a resident 32-bit DPMI host.
 
-### Install or show state
+Commands:
 
 ```dos
 ASPECTD
-```
-
-### Deactivate
-
-```dos
+ASPECTD /A
+ASPECTD /C
 ASPECTD /D
-```
-
-or:
-
-```dos
+ASPECTD /E
 ASPECTD /U
 ```
 
-For ASPECTD, `/U` and `/D` are logical deactivation commands. The DPMI client and interrupt hooks remain resident; there is no physical unload path.
+No argument defaults to `/A`; when already resident, the no-argument form reports resident state.
 
-If the current fitter state is exactly ASPECTD's own applied 4:3 state, the original fitter state is restored. Otherwise the current BIOS/output state is left untouched.
+`/A`, `/C`, `/D` and `/E` have the same policy semantics as ASPECT. `/A` and `/C` can be switched at runtime using the same ownership rules.
 
-### Re-enable
+For ASPECTD, `/U` and `/D` are logical deactivation commands. The DPMI client and interrupt hooks remain resident because the verified HDPMI32 environment does not provide a documented safe way to destroy this resident client context later.
 
-```dos
-ASPECTD /E
-```
+ASPECTD uses two retained 4 KiB DPMI MMIO mappings:
 
-If the current fitter size matches the installation-time fixed raster, correction is reapplied immediately. Otherwise ASPECTD waits for a later compatible BIOS mode set.
+- the Fitter A page at `BAR0+68000h` for `PF_A_POS` and `PF_A_SIZE`
+- the Pipe A page at `BAR0+60000h` for the read-only `PIPESRC` value used by `/C`
 
-ASPECTD uses a DPMI real-mode callback to perform protected MMIO correction after the original BIOS `INT 10h` handler has completed. It preserves the same conservative fixed-raster test and native-VESA exception as ASPECT.
+The second mapping is retained even if ASPECTD starts in `/A`, so later runtime switching to `/C` does not require a new resident mapping operation.
 
 A fitter write/readback failure permanently disables further ASPECTD writes until reboot.
 
@@ -381,6 +421,8 @@ PFSNAP /D
 
 PFSNAP records requested BIOS modes, before/after state, fitter A/B/C registers, pipe timing registers, source sizes, and skipped VM86 captures.
 
+Its Pipe A source measurements were important to the v2.3 `/C` design. For example, mode 13h was observed as a 640×400 `PIPESRC`, demonstrating that the Intel legacy VGA path can internally expand a lower logical VGA resolution before the panel fitter.
+
 ## 10. Troubleshooting
 
 ### Immediate reboot or protection fault
@@ -399,15 +441,23 @@ Load a supported 32-bit DPMI host first. The verified configuration uses residen
 
 ### ASPECT reports that output is already 4:3
 
-This is expected for external outputs where the BIOS already generates a correct legacy timing. No correction TSR is needed.
+In `/A` this is expected for output paths whose installation-time fitter destination is already exactly 4:3. No correction hook is required for that policy.
+
+`/C` is independent of the 4:3 test and can still be useful on a fixed-raster output because it centers the actual pipe source.
 
 ### External display becomes garbled
 
-Use only the conservative final ASPECT/ASPECTD builds. Older experimental builds applied startup-derived window sizes unconditionally and could corrupt mode-dependent external outputs.
+Use the final conservative v2.3 ASPECT/ASPECTD builds. Older experimental builds applied startup-derived sizes more broadly and could disturb mode-dependent external outputs.
 
 ### ASPECT /U refuses to unload
 
-Another TSR owns `INT 10h` or `INT 2Fh` after ASPECT. Unload the later TSR first or reboot.
+Possible reasons include:
+
+- another TSR owns `INT 10h` or `INT 2Fh` after ASPECT
+- the pre-unload `/D` restore/deactivation operation could not be completed safely
+- ASPECT is safety-locked after a fitter write/readback failure
+
+Correct the later TSR chain or reboot as appropriate.
 
 ### ASPECTD /U does not remove the TSR
 
@@ -417,7 +467,7 @@ This is expected. ASPECTD `/U` is a logical deactivation command, equivalent to 
 
 XMS function `0Bh` handle-zero offsets are packed real-mode far pointers, not arbitrary 32-bit physical addresses. This mechanism cannot access MMIO near `F0000000h`.
 
-## 11. Tested software
+## 11. Tested software and modes
 
 Confirmed during development on the primary T430 include:
 
@@ -427,11 +477,13 @@ Plain-DOS ASPECT:
 - standard VGA programs
 - Duke Nukem 3D
 - Descent
+- v2.3 `/C` testing across VGA/VBE modes and the legacy CGA/EGA cases documented above
 
 DPMI ASPECTD with JEMM386/HDPMI32:
 
 - Duke Nukem 3D
 - DOOM
+- `/A` and `/C` runtime policy control
 
 Other confirmed use:
 
@@ -457,7 +509,7 @@ Exact output:
 Visible result:
 ```
 
-For diagnostic reports, include complete output rather than selected lines.
+For ASPECT/ASPECTD reports, include the detected output resolution and selected target window/position lines. For diagnostic reports, include complete output rather than selected lines.
 
 ## 13. License and attribution
 
