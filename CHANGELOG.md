@@ -2,6 +2,34 @@
 
 All notable changes to T430LCD are documented here.
 
+## [2.3.0] — 2026-08-12
+
+### ASPECT / ASPECTD
+
+- Added `/A` as the explicit centered 4:3 aspect-ratio policy selector while preserving no-argument `/A` behavior for backward compatibility.
+- Added `/C` pixel-perfect centered mode. The target is derived dynamically from Pipe A `PIPESRC` rather than from a hard-coded DOS mode table.
+- Added safe runtime switching between `/A` and `/C`. Immediate policy changes are applied only when the fitter is at the installation fixed-raster state or exactly matches the TSR's own last-applied state.
+- Removed the old native-resolution VBE bypass. `/A` now consistently applies aspect correction to successful native VBE modes when the fitter safety checks allow it; `/C` naturally preserves a native source at 1:1 full screen.
+- Added a narrow hardware-verified compatibility correction for legacy BIOS modes `04h`, `05h` and `0Dh`: only when Pipe A reports exactly 320×400, the `/C` target becomes 640×400 by doubling width only.
+- Confirmed that other 320×200 VGA modes, a non-standard VGA-register-compatible 320×400×256 Fractint mode, and tested 640×200 / 640×350 CGA/EGA-family modes do not require this exception.
+- ASPECTD now retains a second 4 KiB DPMI mapping for `BAR0+60000h` so Pipe A `PIPESRC` is available to `/C` and to later runtime policy switching.
+- Preserved the established external-output safety rule and the write policy of modifying only `PF_A_POS` followed by `PF_A_SIZE` with immediate readback verification.
+- Changed plain ASPECT `/U` to execute the same safe resident restore/deactivation path as `/D` before restoring interrupt vectors and freeing the TSR. Unsafe or uncertain restore outcomes now prevent physical unload.
+- Kept ASPECTD `/U` as logical deactivation equivalent to `/D` because the verified resident HDPMI32 client has no documented safe physical-unload path.
+- Shortened normal command/status output while retaining the detected output resolution and selected target window/position diagnostics needed for future hardware reports.
+
+### Hardware validation
+
+- Completed v2.3 `/C` regression testing on the primary ThinkPad T430. All previously problematic CGA/EGA modes work with the final mode-specific exception.
+- Retained successful behavior for tested 640×200 and 640×350 legacy modes without special handling.
+- Added a community ASPECT compatibility report for a Dell Inspiron E5550 with Intel HD Graphics 5500 (Broadwell) and a 1920×1080 internal display. ASPECT produces a 1440×1080 4:3 window at X=240, Y=0.
+- BLCSET was reported not to work on that Broadwell system, so the report is intentionally ASPECT-specific and is not a claim of general T430LCD/Broadwell compatibility.
+
+### Project
+
+- Set the project release documentation and final ASPECT/ASPECTD source headers to T430LCD 2.3.
+- Updated user, design, hardware-test and development-history documentation for the policy-based display-fitting model.
+
 ## [2.2.0] — 2026-08-09
 
 ### ASPECT
