@@ -9,65 +9,135 @@ T430LCD intentionally follows a conservative engineering philosophy:
 - Change the smallest possible register set.
 - Verify every hardware write by readback and visible behaviour.
 - Generalize only after confirming behaviour on real hardware.
+- Preserve useful numeric diagnostics for future hardware reports.
 
 ## Brightness design
 
-Only the active PWM duty register is written. The maximum duty cycle is detected
-from hardware instead of being hard-coded. Requested values are clamped.
+Only the active PWM duty register is written. The maximum duty cycle is detected from hardware instead of being hard-coded. Requested values are clamped.
 
 `BLCSET` uses the direct plain-DOS protected-mode backend.
 
-`BLCSETD` preserves the same register policy through DPMI. It maps only the two
-4 KiB MMIO pages required for the CPU and PCH PWM registers, accesses them through
-DPMI selectors, verifies the duty readback, and releases all mappings/selectors
-before terminating.
+`BLCSETD` preserves the same register policy through DPMI. It maps only the two 4 KiB MMIO pages required for the CPU and PCH PWM registers, accesses them through DPMI selectors, verifies the duty readback, and releases all mappings/selectors before terminating.
 
-`BLCINIT` performs the same one-time brightness operation during CONFIG.SYS
-processing, before a memory manager normally becomes active.
+`BLCINIT` performs the same one-time brightness operation during CONFIG.SYS processing, before a memory manager normally becomes active.
 
-## ASPECT design
+## ASPECT v2.3 policy design
 
-The final algorithm is based on observed display-engine behaviour rather than
-connector type.
+ASPECT/ASPECTD v2.3 separate *safety/ownership* from *display policy*.
 
-At installation:
+The two policies are:
 
-1. Read the current panel-fitter destination.
-2. If it is already 4:3, do not install.
-3. Otherwise compute the largest centred 4:3 rectangle.
+- `/A` — centered 4:3 aspect correction
+- `/C` — pixel-perfect centered source raster
 
-After each watched mode change:
+No argument selects `/A` for backward compatibility.
 
-1. Skip native VESA modes.
-2. Read the current fitter destination.
-3. Apply the correction only if the BIOS restored the same fixed-raster
-   destination captured during installation.
+### Installation-time classification
 
-This avoids disturbing external outputs that already generate correct timings.
+The active Fitter A destination is read at installation and saved as the fixed/native destination.
 
-Confirmed internal-panel geometry now includes two native sizes:
+For `/A`, if the destination is already exactly 4:3, no correction hook is required. Otherwise ASPECT calculates the largest centered 4:3 rectangle.
+
+For `/C`, the 4:3 classification is not used as a reason to skip installation because centered mode is independent of output aspect ratio.
+
+Confirmed `/A` internal-panel geometry includes:
 
 - 1600×900 on the ThinkPad T430 and IdeaPad Yoga 13 → 1200×900 at X=200, Y=0
 - 1366×768 on the HP EliteBook Folio 9470m → 1024×768 at X=171, Y=0
+- 1920×1080 on the Dell Inspiron E5550 / Intel HD Graphics 5500 → 1440×1080 at X=240, Y=0 (ASPECT community report)
 
-The 9470m result is confirmed by user feedback and screenshots and independently
-validates the dynamic geometry calculation on a panel size different from the
-1600×900 development platform.
+### Per-mode ownership rule
 
-The real-mode ASPECT also supports runtime logical control:
+After the original BIOS mode-set handler runs, normal automatic correction is performed only when the current `PF_A_SIZE` equals the installation-time fixed-raster size.
 
-- `/D` deactivates correction while keeping the TSR resident.
-- `/E` re-enables correction and reapplies it immediately when the current fitter
-  size matches the installation-time fixed raster.
-- `/U` remains the true physical unload command.
+This avoids disturbing external output paths where the BIOS programs a mode-specific fitter destination.
 
-On deactivation, the original fitter state is restored only when the current
-position and size exactly match ASPECT's own applied 4:3 state.
+For explicit runtime `/A`↔`/C` switching, immediate application is also permitted when the current `PF_A_POS` and `PF_A_SIZE` exactly match the TSR's last-applied state. That proves ownership without assuming connector type.
+
+### `/A`: aspect policy
+
+The aspect policy uses the existing dynamic 4:3 algorithm:
+
+1. Try full output height with `width = height × 4 / 3`.
+2. If that does not fit, use full output width with `height = width × 3 / 4`.
+3. Round the calculated changing dimension down to an even value.
+4. Center the result.
+
+The old native-resolution VBE exception was removed in v2.3. A successful native VBE mode therefore follows the selected policy like any other mode. This makes `/A` semantically consistent: if the user selects aspect correction, native VBE can also be pillarboxed to 4:3.
+
+### `/C`: pixel-perfect centered policy
+
+`/C` reads Pipe A `PIPESRC` at `BAR0+6001Ch`. The register encodes `(width-1)` in the upper word and `(height-1)` in the lower word.
+
+The decoded dimensions are used directly:
+
+```text
+TargetWidth  = PipeSourceWidth
+TargetHeight = PipeSourceHeight
+X = (NativeWidth  - TargetWidth)  / 2
+Y = (NativeHeight - TargetHeight) / 2
+```
+
+No even rounding is performed because `/C` must preserve exact source dimensions.
+
+A native source therefore naturally becomes full-screen at X=0, Y=0 without any native-VBE exception.
+
+### Legacy CGA/EGA horizontal-doubling exception
+
+Hardware testing found that BIOS modes `04h`, `05h` and `0Dh` can reach Pipe A as 320×400 while visually requiring a 640×400 centered target. This indicates that vertical doubling is already represented while horizontal doubling is absent from the raster that the fitter would otherwise use.
+
+The workaround is deliberately narrow:
+
+```text
+if legacy BIOS mode is 04h, 05h or 0Dh
+and PIPESRC decodes to exactly 320×400:
+    target = 640×400
+else:
+    target = PIPESRC exactly
+```
+
+This rule is both mode-specific and geometry-guarded. It does not affect other working 320-wide modes, including a non-standard VGA-register-compatible 320×400×256 Fractint mode.
+
+The tested 640×200 and 640×350 CGA/EGA-family modes need no workaround.
+
+## Runtime controls
+
+Both ASPECT and ASPECTD support:
+
+- `/A` select aspect policy
+- `/C` select centered policy
+- `/D` deactivate
+- `/E` re-enable the selected policy
+
+On `/D`, the original fitter state is restored only when the current position and size exactly match the TSR's last-applied state. If some other BIOS/output path changed the fitter, the current state is left untouched.
+
+`/E` re-enables the selected policy and applies it immediately only when ownership/safety conditions allow.
+
+### Plain ASPECT `/U`
+
+ASPECT `/U` is a true physical unload, but v2.3 first sends the resident `CMD_DISABLE` operation so the same safe `/D` restore/deactivation path runs while all resident MMIO machinery is still available.
+
+Physical unload proceeds only for normal disable outcomes. It is refused after write/readback failure, safety lock, busy state or resident-control failure. ASPECT also retains the original interrupt-chain ownership checks before restoring `INT 10h` and `INT 2Fh` and freeing memory.
+
+### ASPECTD `/U`
+
+ASPECTD keeps the DPMI client and real-mode interrupt hooks resident. Because the verified HDPMI32 configuration does not provide a documented safe physical-unload path for this design, ASPECTD `/U` remains a logical deactivation equivalent to `/D`.
+
+## Console-output policy
+
+TSR status output is intentionally compact. Long explanatory sentences belong in the documentation.
+
+Useful install-time hardware diagnostics are retained:
+
+- detected output resolution
+- selected target window dimensions
+- selected X/Y position
+
+These values are important for reports from previously untested LCD resolutions.
 
 ## Direct protected-mode backend
 
-The original plain-DOS utilities use a temporary protected-mode transition because
-graphics MMIO resides near F0000000h. The framework:
+The plain-DOS utilities use a temporary protected-mode transition because graphics MMIO resides near `F0000000h`. The framework:
 
 - enables A20 through XMS
 - installs a runtime GDT
@@ -75,55 +145,45 @@ graphics MMIO resides near F0000000h. The framework:
 - uses a flat 4 GiB data selector
 - restores real mode immediately after the operation
 
-This backend is used by tools such as `BLCSET` and the plain-DOS `ASPECT`.
+This backend is used by `BLCSET` and plain-DOS `ASPECT`. It must not be entered from EMM386/JEMM386 virtual-8086 mode.
 
-It must not be entered from EMM386/JEMM386 virtual-8086 mode.
+ASPECT's flat selector already maps physical address space, so `/C` can read Pipe A `PIPESRC` without an additional resident mapping.
 
 ## DPMI backend
 
 `ASPECTD` and `BLCSETD` provide the memory-manager-compatible path.
 
-The DPMI design uses:
+ASPECTD v2.3 uses:
 
 - a resident 32-bit DPMI host such as HDPMI32
 - DPMI physical-memory mapping
-- DPMI selectors for the mapped graphics MMIO
-- a DPMI real-mode callback for the resident ASPECTD INT 10h service
+- DPMI selectors
+- a DPMI real-mode callback for the resident INT 10h service
+- one 4 KiB fitter mapping at `BAR0+68000h`
+- one 4 KiB Pipe A mapping at `BAR0+60000h` used read-only for `PIPESRC`
 
-ASPECTD keeps its DPMI client and real-mode interrupt hooks resident. Because the
-verified HDPMI32 configuration does not provide a documented safe physical-unload
-path for this design, ASPECTD `/U` is intentionally a logical deactivation command,
-equivalent to `/D`.
+Both mappings are retained regardless of the initial policy so runtime `/C` switching remains available.
 
-BLCSETD is simpler because it is not resident: it maps the two required PWM pages,
-changes and verifies the duty, releases the DPMI resources, and exits.
-
-The DPMI path has been verified with JEMM386/HDPMI32 on the ThinkPad T430,
-including protected-mode DOS games with ASPECTD. DPMI was preferred over a
-VCPI-only design because compatibility with VSBHDA is an explicit project goal.
+The DPMI path has been verified with JEMM386/HDPMI32 on the ThinkPad T430, including protected-mode DOS games with ASPECTD. DPMI was preferred over a VCPI-only design because compatibility with VSBHDA is an explicit project goal.
 
 ## Why PF_A_CTL is never written
 
-Experiments showed that rewriting PF_A_CTL could produce flickering or corrupted
-output even when writing back the same value. Stable operation required changing
-only PF_A_POS followed by PF_A_SIZE.
+Experiments showed that rewriting `PF_A_CTL` could produce flickering or corrupted output even when writing back the same value. Stable operation required changing only `PF_A_POS` followed by `PF_A_SIZE`.
 
-The same write policy is used by ASPECT and ASPECTD.
+The same write policy is used by `/A` and `/C` in both ASPECT and ASPECTD. `PIPESRC` is read only; pipe timing/source registers are never modified.
 
 ## Additional verified hardware
 
-Community testing has confirmed the complete T430LCD utility set on:
+Community testing has confirmed the T430LCD utility set on:
 
 - Lenovo IdeaPad Yoga 13 with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1600×900 internal LCD
 - HP EliteBook Folio 9470m with Intel Core i5-3427U / Intel HD Graphics 4000 and a 1366×768 internal LCD
 
-The Yoga 13 therefore uses the same 1200×900, X=200 ASPECT geometry as the T430.
-The 9470m produces a 1024×768, X=171 corrected window; this result is confirmed
-by user feedback and screenshots.
+The v2.3 detailed centered-mode regression matrix is from the primary ThinkPad T430 and should not be generalized to the additional systems without equivalent testing.
 
-These confirmations support the project's measured-behavior approach beyond the
-primary T430 platform. Detailed output-path/PFSNAP logs for the two community-tested
-systems are not yet documented.
+## Broadwell compatibility report
+
+ASPECT has also been reported working on a Dell Inspiron E5550 with Intel HD Graphics 5500 (Broadwell) and a 1920×1080 internal display. The dynamically calculated `/A` window is 1440×1080 at X=240, Y=0. This is useful evidence that the Fitter A policy can extend beyond Ivy Bridge. It does **not** imply that all T430LCD hardware paths extend to Broadwell: BLCSET was reported not to work on the same laptop.
 
 ## Current direction
 
@@ -131,5 +191,5 @@ Current follow-up work is focused on:
 
 - additional Ivy Bridge/Intel HD Graphics 4000 hardware validation
 - collecting detailed output-path/PFSNAP logs for community-verified systems
-- additional output-path diagnostics where new hardware differs
+- reports from additional native LCD resolutions using the retained geometry diagnostics
 - continued regression testing of both the direct and DPMI backends
