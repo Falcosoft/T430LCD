@@ -506,6 +506,14 @@ CallbackPrepareCenter:
         jne     CallbackPrepareCenterSized
         mov     bl,byte ptr gs:[RequestedLegacyMode]
         and     bl,7Fh
+
+        ; BIOS 40x25 text modes 00h/01h: only when Pipe A is exactly
+        ; 360x400, restore the missing horizontal x2 and target 720x400.
+        cmp     bl,00h
+        je      CallbackPrepareLegacy360Check
+        cmp     bl,01h
+        je      CallbackPrepareLegacy360Check
+
         cmp     bl,04h
         je      CallbackPrepareLegacy320Check
         cmp     bl,05h
@@ -514,6 +522,14 @@ CallbackPrepareCenter:
         jne     CallbackPrepareCenterSized
 CallbackPrepareLegacy320Check:
         cmp     ax,320
+        jne     CallbackPrepareCenterSized
+        cmp     dx,400
+        jne     CallbackPrepareCenterSized
+        shl     ax,1
+        jmp     CallbackPrepareCenterSized
+
+CallbackPrepareLegacy360Check:
+        cmp     ax,360
         jne     CallbackPrepareCenterSized
         cmp     dx,400
         jne     CallbackPrepareCenterSized

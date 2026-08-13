@@ -578,6 +578,14 @@ PmPrepareCenter:
         jne PmPrepareCenterSized
         mov bl,byte ptr es:[RequestedLegacyMode]
         and bl,7Fh
+
+        ; BIOS 40x25 text modes 00h/01h: only when Pipe A is exactly
+        ; 360x400, restore the missing horizontal x2 and target 720x400.
+        cmp bl,00h
+        je PmPrepareLegacy360Check
+        cmp bl,01h
+        je PmPrepareLegacy360Check
+
         cmp bl,04h
         je PmPrepareLegacy320Check
         cmp bl,05h
@@ -586,6 +594,14 @@ PmPrepareCenter:
         jne PmPrepareCenterSized
 PmPrepareLegacy320Check:
         cmp ax,320
+        jne PmPrepareCenterSized
+        cmp dx,400
+        jne PmPrepareCenterSized
+        shl ax,1
+        jmp PmPrepareCenterSized
+
+PmPrepareLegacy360Check:
+        cmp ax,360
         jne PmPrepareCenterSized
         cmp dx,400
         jne PmPrepareCenterSized
