@@ -1,10 +1,12 @@
 ; ASPECT.ASM
-; T430LCD 2.3 - ASPECT
+; T430LCD 2.3 /AS+/S FIR-91 optimized test - ASPECT
 ; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
 ; Resident aspect-ratio / pixel-perfect centered display corrector.
 ;
 ; At installation it reads the active Fitter A destination size. The default
-; /A policy retains the proven dynamic 4:3 correction algorithm. /C instead
+; /A policy retains the proven dynamic 4:3 correction algorithm. /AS uses the
+; same geometry with the selected FIR-91 programmable filter. /S applies
+; only that filter and keeps the current fitter geometry unchanged. /C instead
 ; reads Pipe A PIPESRC and centers that exact raster inside the fixed output.
 ; After each mode set, ASPECT first checks whether the BIOS restored the same
 ; fixed-raster destination captured at installation before applying a policy.
@@ -22,22 +24,24 @@
 ;
 ; Commands:
 ;   ASPECT        install with aspect-ratio correction (unchanged default)
-;   ASPECT /A     install/select aspect-ratio correction
+;   ASPECT /A     install/select aspect-ratio correction (Medium 3x3)
+;   ASPECT /AS    install/select aspect-ratio correction (FIR-91 sharp filter)
+;   ASPECT /S     install/select FIR-91 sharp filter only; keep current geometry
 ;   ASPECT /C     install/select pixel-perfect centered mode
 ;   ASPECT /U     restore/deactivate, then physically unload the TSR
 ;   ASPECT /D     deactivate correction without unloading
 ;   ASPECT /E     re-enable the selected policy
+;   ASPECT /?     show a short command summary
 ;
 ; Requirements:
 ;   - plain real-mode DOS for active correction
 ;   - HIMEM/XMS available during installation
 ;   - do not load twice
 ;
-; The resident handler writes only dynamically calculated values to:
-;   BAR0+68070h  Fitter A window position
-;   BAR0+68074h  Fitter A window size
-;
-; It never modifies PF_A_CTL, PF_A_VSCALE, or PF_A_HSCALE.
+; /A and /C retain their existing POS/SIZE behavior. /AS and /S additionally use the
+; hardware-verified Ivy Bridge PF0 programmable-coefficient interface at
+; 680A0h/680A4h and 680B0h/680B4h and selects PF_CTRL filter 00b.
+; PF_A_VSCALE and PF_A_HSCALE are never modified.
 
 .model tiny
 .386p
@@ -46,9 +50,24 @@ org 100h
 
 include T430LCD.INC
 
-PF_A_POS  equ PF_A_POS_OFFSET
-PF_A_SIZE equ PF_A_SIZE_OFFSET
-PIPE_A_SRC equ 06001Ch
+PF_A_POS          equ PF_A_POS_OFFSET
+PF_A_SIZE         equ PF_A_SIZE_OFFSET
+PF_A_CTL          equ PF_A_CTL_OFFSET
+PF_A_HCOEF_INDEX  equ PF_A_HCOEF_INDEX_OFFSET
+PF_A_HCOEF_DATA   equ PF_A_HCOEF_DATA_OFFSET
+PF_A_VCOEF_INDEX  equ PF_A_VCOEF_INDEX_OFFSET
+PF_A_VCOEF_DATA   equ PF_A_VCOEF_DATA_OFFSET
+PIPE_A_SRC        equ 06001Ch
+
+H_DWORDS          equ 120
+V_DWORDS          equ 86
+H_LAST_INDEX      equ 077h
+V_LAST_INDEX      equ 055h
+INDEX_MASK        equ 007Fh
+AUTO_INC_BIT      equ 8000h
+FILTER_MASK       equ 01800000h
+FILTER_CLEAR      equ 0FE7FFFFFh
+FILTER_MEDIUM     equ 00800000h
 
 MUX_PRESENT       equ 0FEC0h
 MUX_PRESENT_REPLY equ 0C0FEh
@@ -69,6 +88,8 @@ STATE_WRITE_FAILED   equ 02h
 
 POLICY_ASPECT         equ 00h
 POLICY_CENTER         equ 01h
+POLICY_ASPECT_SHARP   equ 02h
+POLICY_SHARP_ONLY     equ 03h
 
 OP_MODE               equ 00h
 CMD_DISABLE           equ 01h
@@ -76,6 +97,8 @@ CMD_ENABLE            equ 02h
 CMD_ASPECT            equ 03h
 CMD_CENTER            equ 04h
 OP_APPLY              equ 05h
+CMD_ASPECT_SHARP      equ 06h
+CMD_SHARP_ONLY         equ 07h
 
 CTL_DISABLED_RESTORED equ 01h
 CTL_DISABLED_ONLY     equ 02h
@@ -97,6 +120,9 @@ ARG_DISABLE           equ 02h
 ARG_ENABLE            equ 03h
 ARG_ASPECT            equ 04h
 ARG_CENTER            equ 05h
+ARG_ASPECT_SHARP      equ 06h
+ARG_SHARP_ONLY        equ 07h
+ARG_HELP              equ 08h
 ARG_INVALID           equ 0FFh
 
 
@@ -142,6 +168,10 @@ MuxControl:
         cmp bl,CMD_ASPECT
         je MuxControlValid
         cmp bl,CMD_CENTER
+        je MuxControlValid
+        cmp bl,CMD_ASPECT_SHARP
+        je MuxControlValid
+        cmp bl,CMD_SHARP_ONLY
         je MuxControlValid
 
         mov ax,MUX_CONTROL_REPLY
@@ -190,7 +220,7 @@ NewInt10 proc far
 HookLegacyModeSet:
         mov     byte ptr cs:[ModeSetKind],1
         mov     byte ptr cs:[RequestedLegacyMode],al
-        jmp     short HookCallOriginal
+        jmp     HookCallOriginal
 
 HookVbeModeSet:
         mov     byte ptr cs:[ModeSetKind],2
@@ -247,6 +277,11 @@ NewInt10 endp
 ; ----------------------------------------------------------------------
 ; Switch from an interrupt caller's stack to ASPECT's private resident stack
 ; before entering the protected-mode MMIO engine.
+;
+; The resident PSP is retained with every DOS TSR. Its upper command-tail/FCB
+; area below 0100h is otherwise unused after installation, so use that space
+; as the private interrupt stack instead of retaining a separate 512-byte
+; buffer. The stack grows downward from 0100h and cannot overlap resident code.
 ; ----------------------------------------------------------------------
 EngineFromInterrupt proc near
         mov ax,ss
@@ -256,7 +291,7 @@ EngineFromInterrupt proc near
         cli
         mov ax,cs
         mov ss,ax
-        mov sp,offset LocalStackTop
+        mov sp,0100h
 
         call ResidentEngineCore
 
@@ -274,8 +309,9 @@ EngineFromInterrupt endp
 ;   OP_MODE     - normal post-mode-set correction
 ;   CMD_DISABLE - logical /D
 ;   CMD_ENABLE  - logical /E
-;   CMD_ASPECT  - select aspect-ratio policy (/A)
-;   CMD_CENTER  - select pixel-perfect centered policy (/C)
+;   CMD_ASPECT       - select aspect-ratio policy (/A)
+;   CMD_ASPECT_SHARP - select sharp aspect-ratio policy (/AS)
+;   CMD_CENTER       - select pixel-perfect centered policy (/C)
 ;   OP_APPLY    - installation-time initial apply
 ;
 ; The engine performs one RM->PM->RM transition per operation and shares the
@@ -320,6 +356,10 @@ EnginePmEntry:
         cmp al,CMD_ASPECT
         je EnginePmSelectPolicy
         cmp al,CMD_CENTER
+        je EnginePmSelectPolicy
+        cmp al,CMD_ASPECT_SHARP
+        je EnginePmSelectPolicy
+        cmp al,CMD_SHARP_ONLY
         je EnginePmSelectPolicy
         cmp al,OP_APPLY
         je EnginePmInitialApply
@@ -367,6 +407,9 @@ EnginePmDisableLocked:
 EnginePmDisableActive:
         mov byte ptr es:[CorrectionState],STATE_USER_DISABLED
 
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        je EnginePmDisableSharpOnly
+
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_POS
         MMIO_READ_EAX_ESI
@@ -382,6 +425,13 @@ EnginePmDisableActive:
         call PmRestoreOriginal
         jnc EnginePmDisableRestored
 
+        mov byte ptr es:[CorrectionState],STATE_WRITE_FAILED
+        mov byte ptr es:[ControlResult],CTL_WRITE_FAILED
+        jmp EnginePmLeave
+
+EnginePmDisableSharpOnly:
+        call PmRestoreOriginal
+        jnc EnginePmDisableRestored
         mov byte ptr es:[CorrectionState],STATE_WRITE_FAILED
         mov byte ptr es:[ControlResult],CTL_WRITE_FAILED
         jmp EnginePmLeave
@@ -404,12 +454,17 @@ EnginePmEnable:
 
         mov byte ptr es:[CorrectionState],STATE_ENABLED
 
+        ; /S owns no geometry, so /E can safely reapply it immediately.
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        je EnginePmEnableApply
+
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_SIZE
         MMIO_READ_EAX_ESI
         cmp eax,dword ptr es:[NativeSize]
         jne EnginePmEnablePending
 
+EnginePmEnableApply:
         call PmPrepareTarget
         jc EnginePmEnablePending
         call PmApplyTarget
@@ -436,7 +491,7 @@ EnginePmEnableLocked:
         mov byte ptr es:[ControlResult],CTL_LOCKED
         jmp EnginePmLeave
 
-; /A or /C - select a policy. If correction is currently enabled, apply the
+; /A, /AS or /C - select a policy. If correction is currently enabled, apply the
 ; new policy immediately only when the fitter is either at the installation
 ; fixed raster or still exactly owned by ASPECT. Otherwise remember the policy
 ; and wait for the next compatible BIOS mode set.
@@ -446,15 +501,27 @@ EnginePmSelectPolicy:
 
         mov al,byte ptr es:[EngineOperation]
         cmp al,CMD_CENTER
-        jne EnginePmSelectAspect
-        mov byte ptr es:[CurrentPolicy],POLICY_CENTER
-        jmp short EnginePmSelectState
-EnginePmSelectAspect:
+        je EnginePmSelectCenter
+        cmp al,CMD_ASPECT_SHARP
+        je EnginePmSelectSharp
+        cmp al,CMD_SHARP_ONLY
+        je EnginePmSelectSharpOnly
         mov byte ptr es:[CurrentPolicy],POLICY_ASPECT
+        jmp EnginePmSelectState
+EnginePmSelectCenter:
+        mov byte ptr es:[CurrentPolicy],POLICY_CENTER
+        jmp EnginePmSelectState
+EnginePmSelectSharp:
+        mov byte ptr es:[CurrentPolicy],POLICY_ASPECT_SHARP
+        jmp EnginePmSelectState
+EnginePmSelectSharpOnly:
+        mov byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
 
 EnginePmSelectState:
         cmp byte ptr es:[CorrectionState],STATE_ENABLED
         jne EnginePmSelectDisabled
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        je EnginePmSelectApply
 
         ; Safe if BIOS currently owns the original fixed-raster state.
         mov esi,dword ptr es:[MmioBase]
@@ -545,6 +612,8 @@ ResidentEngineCore endp
 ; CF clear = valid target; CF set = source cannot be centered in native raster.
 ; ----------------------------------------------------------------------
 PmPrepareTarget proc near
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        je PmPrepareCurrent
         cmp byte ptr es:[CurrentPolicy],POLICY_CENTER
         je PmPrepareCenter
 
@@ -552,6 +621,20 @@ PmPrepareTarget proc near
         mov dword ptr es:[AppliedPos],eax
         mov eax,dword ptr es:[AspectSize]
         mov dword ptr es:[AppliedSize],eax
+        clc
+        ret
+
+PmPrepareCurrent:
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_POS
+        MMIO_READ_EAX_ESI
+        mov dword ptr es:[AppliedPos],eax
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_SIZE
+        MMIO_READ_EAX_ESI
+        mov dword ptr es:[AppliedSize],eax
+        test eax,eax
+        jz PmPrepareBad
         clc
         ret
 
@@ -570,22 +653,23 @@ PmPrepareCenter:
         test dx,dx
         jz PmPrepareBad
 
-        ; The observed CGA 4-color and EGA 320x200x16 symptoms are consistent
-        ; with BIOS modes 04h/05h/0Dh reaching Pipe A as 320x400: vertical
-        ; doubling present, horizontal doubling absent. Apply x2 horizontally
-        ; only when that exact source geometry is actually observed.
+        ; Some standard legacy modes reach Pipe A with vertical doubling
+        ; already present but the expected horizontal x2 still absent. Keep
+        ; these exceptions narrow: require both the BIOS mode number and the
+        ; exact observed source geometry before doubling the target width.
         cmp byte ptr es:[ModeSetKind],1
         jne PmPrepareCenterSized
         mov bl,byte ptr es:[RequestedLegacyMode]
         and bl,7Fh
 
-        ; BIOS 40x25 text modes 00h/01h: only when Pipe A is exactly
-        ; 360x400, restore the missing horizontal x2 and target 720x400.
+        ; 40x25 text modes 00h/01h: expected Pipe A source 360x400 -> 720x400.
         cmp bl,00h
         je PmPrepareLegacy360Check
         cmp bl,01h
         je PmPrepareLegacy360Check
 
+        ; CGA 320x200 4-color 04h/05h and EGA 320x200x16 0Dh:
+        ; observed/inferred Pipe A source 320x400 -> 640x400.
         cmp bl,04h
         je PmPrepareLegacy320Check
         cmp bl,05h
@@ -647,6 +731,32 @@ PmPrepareTarget endp
 ; CF clear = success, CF set = verification failure.
 ; ----------------------------------------------------------------------
 PmApplyTarget proc near
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        jne PmApplyTargetCheckAspectSharp
+        call PmActivateSharp
+        jc PmApplyTargetBad
+        call PmArmCurrentSize
+        jc PmApplyTargetBad
+        clc
+        ret
+
+PmApplyTargetCheckAspectSharp:
+        ; /AS programs the proven center-tap-only coefficient tables and selects
+        ; Programmed filtering. Leaving /AS restores Medium3x3 before the same
+        ; POS/SIZE write sequence; PF_A_SIZE then arms the filter change.
+        cmp byte ptr es:[CurrentPolicy],POLICY_ASPECT_SHARP
+        jne PmApplyTargetNotSharp
+        call PmActivateSharp
+        jc PmApplyTargetBad
+        jmp PmApplyTargetGeometry
+
+PmApplyTargetNotSharp:
+        cmp byte ptr es:[SharpActive],0
+        je PmApplyTargetGeometry
+        call PmSelectMedium
+        jc PmApplyTargetBad
+
+PmApplyTargetGeometry:
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_POS
         mov eax,dword ptr es:[AppliedPos]
@@ -681,6 +791,25 @@ PmApplyTarget endp
 ; CF clear = success, CF set = verification failure.
 ; ----------------------------------------------------------------------
 PmRestoreOriginal proc near
+        cmp byte ptr es:[CurrentPolicy],POLICY_SHARP_ONLY
+        jne PmRestoreOriginalNormal
+        cmp byte ptr es:[SharpActive],0
+        je PmRestoreSharpOnlyArm
+        call PmSelectMedium
+        jc PmRestoreOriginalBad
+PmRestoreSharpOnlyArm:
+        call PmArmCurrentSize
+        jc PmRestoreOriginalBad
+        clc
+        ret
+
+PmRestoreOriginalNormal:
+        cmp byte ptr es:[SharpActive],0
+        je PmRestoreOriginalGeometry
+        call PmSelectMedium
+        jc PmRestoreOriginalBad
+
+PmRestoreOriginalGeometry:
         mov esi,dword ptr es:[MmioBase]
         add esi,PF_A_POS
         mov eax,dword ptr es:[OriginalPos]
@@ -710,6 +839,441 @@ PmRestoreOriginalBad:
         stc
         ret
 PmRestoreOriginal endp
+
+; Rewrite the current SIZE value unchanged to arm a PF_CTRL filter update.
+PmArmCurrentSize proc near
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_SIZE
+        MMIO_READ_EAX_ESI
+        mov edx,eax
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        cmp eax,edx
+        jne PmArmCurrentSizeBad
+        clc
+        ret
+PmArmCurrentSizeBad:
+        stc
+        ret
+PmArmCurrentSize endp
+
+; ----------------------------------------------------------------------
+; /AS and /S programmable-filter helpers.
+; FIR-91 is the selected compromise between the hardware-tested FIR-94 and
+; FIR-88 candidates. The same symmetric 3-tap kernel is used
+; for every phase. Index movement uses the documented auto-increment/rollover
+; mechanism; direct backwards index writes are never used.
+; ----------------------------------------------------------------------
+PmActivateSharp proc near
+        ; Save legal current index states so table operations can restore them.
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_HCOEF_INDEX
+        MMIO_READ_EAX_ESI
+        mov dword ptr es:[SharpOrigHIndex],eax
+        mov edx,eax
+        and edx,0FFFF7F80h
+        jnz PmActivateSharpBad
+        and ax,INDEX_MASK
+        cmp ax,H_LAST_INDEX
+        ja PmActivateSharpBad
+
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_VCOEF_INDEX
+        MMIO_READ_EAX_ESI
+        mov dword ptr es:[SharpOrigVIndex],eax
+        mov edx,eax
+        and edx,0FFFF7F80h
+        jnz PmActivateSharpBad
+        and ax,INDEX_MASK
+        cmp ax,V_LAST_INDEX
+        ja PmActivateSharpBad
+
+        call PmSetHWork
+        call PmWriteVerifyWorkTable
+        jc PmActivateSharpBad
+
+        call PmSetVWork
+        call PmWriteVerifyWorkTable
+        jc PmActivateSharpBad
+
+        ; Programmed coefficients = filter selector 00b. Preserve all other
+        ; PF_CTRL bits. Require PF0 enabled on Pipe A, as on the verified T430.
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_CTL
+        MMIO_READ_EAX_ESI
+        test eax,80000000h
+        jz PmActivateSharpBad
+        mov edx,eax
+        and edx,60000000h
+        jnz PmActivateSharpBad
+        and eax,FILTER_CLEAR
+        mov edx,eax
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        cmp eax,edx
+        jne PmActivateSharpBad
+
+        mov byte ptr es:[SharpActive],1
+        clc
+        ret
+PmActivateSharpBad:
+        stc
+        ret
+PmActivateSharp endp
+
+; Select the normal hardcoded Medium3x3 filter while preserving all other
+; PF_CTRL bits. The caller's subsequent PF_A_SIZE write arms the change.
+PmSelectMedium proc near
+        mov esi,dword ptr es:[MmioBase]
+        add esi,PF_A_CTL
+        MMIO_READ_EAX_ESI
+        and eax,FILTER_CLEAR
+        or eax,FILTER_MEDIUM
+        mov edx,eax
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        cmp eax,edx
+        jne PmSelectMediumBad
+        mov byte ptr es:[SharpActive],0
+        clc
+        ret
+PmSelectMediumBad:
+        stc
+        ret
+PmSelectMedium endp
+
+PmSetHWork proc near
+        mov byte ptr es:[WorkAxis],0
+        mov eax,dword ptr es:[MmioBase]
+        add eax,PF_A_HCOEF_INDEX
+        mov dword ptr es:[WorkIndexAddr],eax
+        mov eax,dword ptr es:[MmioBase]
+        add eax,PF_A_HCOEF_DATA
+        mov dword ptr es:[WorkDataAddr],eax
+        mov eax,dword ptr es:[SharpOrigHIndex]
+        mov dword ptr es:[WorkOrigIndex],eax
+        mov word ptr es:[WorkCount],H_DWORDS
+        mov word ptr es:[WorkLast],H_LAST_INDEX
+        ret
+PmSetHWork endp
+
+PmSetVWork proc near
+        mov byte ptr es:[WorkAxis],1
+        mov eax,dword ptr es:[MmioBase]
+        add eax,PF_A_VCOEF_INDEX
+        mov dword ptr es:[WorkIndexAddr],eax
+        mov eax,dword ptr es:[MmioBase]
+        add eax,PF_A_VCOEF_DATA
+        mov dword ptr es:[WorkDataAddr],eax
+        mov eax,dword ptr es:[SharpOrigVIndex]
+        mov dword ptr es:[WorkOrigIndex],eax
+        mov word ptr es:[WorkCount],V_DWORDS
+        mov word ptr es:[WorkLast],V_LAST_INDEX
+        ret
+PmSetVWork endp
+
+PmPositionWorkZeroAuto proc near
+        push bx
+        push cx
+        push dx
+        push eax
+        push edx
+        push esi
+
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        cmp eax,dword ptr es:[WorkOrigIndex]
+        je PmPWZAAtOrig
+        call PmRestoreWorkIndex
+        jc PmPWZAFail
+
+PmPWZAAtOrig:
+        mov eax,dword ptr es:[WorkOrigIndex]
+        and eax,0000007Fh
+        or eax,00008000h
+        mov edx,eax
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        cmp eax,edx
+        jne PmPWZAFail
+
+        mov bx,word ptr es:[WorkOrigIndex]
+        and bx,INDEX_MASK
+        or bx,bx
+        jz PmPWZACheckZero
+        mov cx,word ptr es:[WorkCount]
+        sub cx,bx
+        mov esi,dword ptr es:[WorkDataAddr]
+PmPWZARollLoop:
+        MMIO_READ_EAX_ESI
+        dec cx
+        jnz PmPWZARollLoop
+
+PmPWZACheckZero:
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        cmp eax,00008000h
+        jne PmPWZAFail
+        clc
+        jmp PmPWZAExit
+PmPWZAFail:
+        stc
+PmPWZAExit:
+        pop esi
+        pop edx
+        pop eax
+        pop dx
+        pop cx
+        pop bx
+        ret
+PmPositionWorkZeroAuto endp
+
+PmRestoreWorkIndex proc near
+        push ebx
+        push cx
+        push dx
+        push eax
+        push edx
+        push esi
+
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        mov edx,eax
+        mov eax,edx
+        and eax,0FFFF7F80h
+        jnz PmRWIFail
+        mov bx,dx
+        and bx,INDEX_MASK
+        cmp bx,word ptr es:[WorkLast]
+        ja PmRWIFail
+
+        test edx,00008000h
+        jnz PmRWIHaveAuto
+        mov eax,edx
+        and eax,0000007Fh
+        or eax,00008000h
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        mov cx,bx
+        or cx,AUTO_INC_BIT
+        cmp ax,cx
+        jne PmRWIFail
+
+PmRWIHaveAuto:
+        mov dx,bx
+        mov bx,word ptr es:[WorkOrigIndex]
+        and bx,INDEX_MASK
+        mov cx,bx
+        cmp dx,bx
+        jbe PmRWINoWrap
+        add cx,word ptr es:[WorkCount]
+PmRWINoWrap:
+        sub cx,dx
+        jcxz PmRWIAtTarget
+        mov esi,dword ptr es:[WorkDataAddr]
+PmRWIAdvance:
+        MMIO_READ_EAX_ESI
+        dec cx
+        jnz PmRWIAdvance
+
+PmRWIAtTarget:
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        mov edx,eax
+        and edx,0000807Fh
+        mov eax,dword ptr es:[WorkOrigIndex]
+        and eax,0000007Fh
+        or eax,00008000h
+        cmp edx,eax
+        jne PmRWIFail
+
+        mov eax,dword ptr es:[WorkOrigIndex]
+        and eax,0000807Fh
+        mov edx,eax
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_WRITE_EAX_ESI
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        cmp eax,edx
+        jne PmRWIFail
+        clc
+        jmp PmRWIExit
+PmRWIFail:
+        stc
+PmRWIExit:
+        pop esi
+        pop edx
+        pop eax
+        pop dx
+        pop cx
+        pop ebx
+        ret
+PmRestoreWorkIndex endp
+
+; Return the FIR-91 coefficient DWORD for work-table ordinal BX.
+; All 17 phases use the same symmetric 3-tap kernel:
+;   side = 32E0h, center = 1E90h, side = 32E0h.
+; Tiny two-phase templates replace the former 824-byte literal H/V tables.
+PmGetExpectedDword proc near
+        push bx
+        push cx
+        push dx
+        push si
+
+        mov ax,bx
+        cmp byte ptr es:[WorkAxis],0
+        jne PmGEDVertical
+
+        ; Horizontal: 60 DWORDs per set. Two phases occupy 7 DWORDs.
+        cmp ax,60
+        jb PmGEDHSet
+        sub ax,60
+PmGEDHSet:
+        cmp ax,59
+        je PmGEDHFinal
+        cmp ax,56
+        jae PmGEDHTail
+        xor dx,dx
+        mov cx,7
+        div cx
+        mov si,offset HFir91Pair
+        shl dx,1
+        shl dx,1
+        add si,dx
+        mov eax,dword ptr es:[si]
+        jmp PmGEDDone
+PmGEDHTail:
+        sub ax,56
+        mov si,offset HFir91Pair
+        shl ax,1
+        shl ax,1
+        add si,ax
+        mov eax,dword ptr es:[si]
+        jmp PmGEDDone
+PmGEDHFinal:
+        mov eax,00003000h
+        jmp PmGEDDone
+
+PmGEDVertical:
+        ; Vertical: 43 DWORDs per set. Two phases occupy 5 DWORDs.
+        cmp ax,43
+        jb PmGEDVSet
+        sub ax,43
+PmGEDVSet:
+        cmp ax,42
+        je PmGEDVFinal
+        cmp ax,40
+        jae PmGEDVTail
+        xor dx,dx
+        mov cx,5
+        div cx
+        mov si,offset VFir91Pair
+        shl dx,1
+        shl dx,1
+        add si,dx
+        mov eax,dword ptr es:[si]
+        jmp PmGEDDone
+PmGEDVTail:
+        sub ax,40
+        mov si,offset VFir91Pair
+        shl ax,1
+        shl ax,1
+        add si,ax
+        mov eax,dword ptr es:[si]
+        jmp PmGEDDone
+PmGEDVFinal:
+        mov eax,00003000h
+
+PmGEDDone:
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        ret
+PmGetExpectedDword endp
+
+PmWriteVerifyWorkTable proc near
+        push ax
+        push bx
+        push cx
+        push dx
+        push eax
+        push edx
+        push esi
+
+        mov byte ptr es:[WorkError],0
+        call PmPositionWorkZeroAuto
+        jnc PmWVWTWrite
+        mov byte ptr es:[WorkError],1
+        jmp PmWVWTRestoreIndex
+
+PmWVWTWrite:
+        xor bx,bx
+        mov cx,word ptr es:[WorkCount]
+        mov esi,dword ptr es:[WorkDataAddr]
+PmWVWTWriteLoop:
+        call PmGetExpectedDword
+        MMIO_WRITE_EAX_ESI
+        inc bx
+        dec cx
+        jnz PmWVWTWriteLoop
+
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        cmp eax,00008000h
+        je PmWVWTVerify
+        mov byte ptr es:[WorkError],1
+
+PmWVWTVerify:
+        xor bx,bx
+        mov cx,word ptr es:[WorkCount]
+        mov esi,dword ptr es:[WorkDataAddr]
+PmWVWTVerifyLoop:
+        MMIO_READ_EAX_ESI
+        mov edx,eax
+        call PmGetExpectedDword
+        cmp edx,eax
+        je PmWVWTVerifyMatch
+        mov byte ptr es:[WorkError],1
+PmWVWTVerifyMatch:
+        inc bx
+        dec cx
+        jnz PmWVWTVerifyLoop
+
+        mov esi,dword ptr es:[WorkIndexAddr]
+        MMIO_READ_EAX_ESI
+        and eax,0000807Fh
+        cmp eax,00008000h
+        je PmWVWTRestoreIndex
+        mov byte ptr es:[WorkError],1
+
+PmWVWTRestoreIndex:
+        call PmRestoreWorkIndex
+        jnc PmWVWTResult
+        mov byte ptr es:[WorkError],1
+PmWVWTResult:
+        cmp byte ptr es:[WorkError],0
+        jne PmWVWTFail
+        clc
+        jmp PmWVWTExit
+PmWVWTFail:
+        stc
+PmWVWTExit:
+        pop esi
+        pop edx
+        pop eax
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+PmWriteVerifyWorkTable endp
 
 ; ----------------------------------------------------------------------
 ; Resident GDT and data.
@@ -761,10 +1325,26 @@ ModeSetKind         db 0
 EngineOperation     db OP_MODE
 EngineStatus        db 0
 ControlResult       db 0
+SharpActive         db 0
+SharpOrigHIndex     dd 0
+SharpOrigVIndex     dd 0
+WorkIndexAddr       dd 0
+WorkDataAddr        dd 0
+WorkOrigIndex       dd 0
+WorkCount           dw 0
+WorkLast            dw 0
+WorkAxis            db 0
+WorkError           db 0
 
-; Private stack used by resident INT 10h / INT 2Fh control operations.
-LocalStack          db 512 dup (0)
-LocalStackTop label byte
+; FIR-91: 4.4921875% / 91.015625% / 4.4921875%.
+; Because all 17 phases and both color sets are identical, only packed
+; two-phase patterns are resident. The final odd coefficient is generated as
+; 00003000h by PmGetExpectedDword.
+HFir91Pair:
+        dd 30003000h,1E9032E0h,300032E0h,30003000h
+        dd 32E03000h,32E01E90h,30003000h
+VFir91Pair:
+        dd 32E03000h,32E01E90h,30003000h,1E9032E0h,300032E0h
 
 ResidentEnd label byte
 
@@ -789,6 +1369,10 @@ InstallerStart:
         int 21h
 
 CommandParsed:
+        cmp al,ARG_DEFAULT
+        je InstallDefault
+        cmp al,ARG_HELP
+        je ShowHelp
         cmp al,ARG_UNINSTALL
         je Uninstall
         cmp al,ARG_DISABLE
@@ -799,15 +1383,31 @@ CommandParsed:
         je SelectAspectCommand
         cmp al,ARG_CENTER
         je SelectCenterCommand
+        cmp al,ARG_ASPECT_SHARP
+        je SelectSharpCommand
+        cmp al,ARG_SHARP_ONLY
+        je SelectSharpOnlyCommand
+
+ShowHelp:
+        mov dx,offset MsgHelp
+        call PrintZ
+        mov ax,4C00h
+        int 21h
 
 InstallDefault:
         mov byte ptr [CurrentPolicy],POLICY_ASPECT
-        jmp short InstallBegin
+        jmp InstallBegin
 InstallAspect:
         mov byte ptr [CurrentPolicy],POLICY_ASPECT
-        jmp short InstallBegin
+        jmp InstallBegin
 InstallCenter:
         mov byte ptr [CurrentPolicy],POLICY_CENTER
+        jmp InstallBegin
+InstallSharp:
+        mov byte ptr [CurrentPolicy],POLICY_ASPECT_SHARP
+        jmp InstallBegin
+InstallSharpOnly:
+        mov byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
 InstallBegin:
         ; Refuse installation if already present.
         mov ax,MUX_PRESENT
@@ -865,6 +1465,8 @@ InstallBegin:
         call PrintCRLF
 
         cmp byte ptr [CurrentPolicy],POLICY_CENTER
+        je ApplyInitialPolicy
+        cmp byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
         je ApplyInitialPolicy
         cmp byte ptr [CorrectionNeeded],0
         jne ApplyInitialPolicy
@@ -925,10 +1527,20 @@ ApplyInitialPolicy:
 
         cmp byte ptr [CurrentPolicy],POLICY_CENTER
         je InstallPrintCenter
+        cmp byte ptr [CurrentPolicy],POLICY_ASPECT_SHARP
+        je InstallPrintSharp
+        cmp byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
+        je InstallPrintSharpOnly
         mov dx,offset MsgInstalledAspect
-        jmp short InstallPrintDone
+        jmp InstallPrintDone
 InstallPrintCenter:
         mov dx,offset MsgInstalledCenter
+        jmp InstallPrintDone
+InstallPrintSharp:
+        mov dx,offset MsgInstalledSharp
+        jmp InstallPrintDone
+InstallPrintSharpOnly:
+        mov dx,offset MsgInstalledSharpOnly
 InstallPrintDone:
         call PrintZ
 
@@ -1035,6 +1647,34 @@ SelectCenterCommand:
         mov ax,4C00h
         int 21h
 
+SelectSharpCommand:
+        mov ax,MUX_PRESENT
+        int 2Fh
+        cmp ax,MUX_PRESENT_REPLY
+        jne InstallSharp
+        mov ax,MUX_CONTROL
+        mov bl,CMD_ASPECT_SHARP
+        int 2Fh
+        cmp ax,MUX_CONTROL_REPLY
+        jne ControlProtocolFail
+        call PrintPolicyResult
+        mov ax,4C00h
+        int 21h
+
+SelectSharpOnlyCommand:
+        mov ax,MUX_PRESENT
+        int 2Fh
+        cmp ax,MUX_PRESENT_REPLY
+        jne InstallSharpOnly
+        mov ax,MUX_CONTROL
+        mov bl,CMD_SHARP_ONLY
+        int 2Fh
+        cmp ax,MUX_CONTROL_REPLY
+        jne ControlProtocolFail
+        call PrintPolicyResult
+        mov ax,4C00h
+        int 21h
+
 ControlNotInstalled:
         mov dx,offset MsgNotInstalled
         call PrintZ
@@ -1049,7 +1689,7 @@ ControlProtocolFail:
 
 ; ----------------------------------------------------------------------
 ; Command parser.
-; AL = ARG_DEFAULT / ARG_UNINSTALL / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_CENTER / ARG_INVALID.
+; AL = ARG_DEFAULT / ARG_UNINSTALL / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_ASPECT_SHARP / ARG_SHARP_ONLY / ARG_CENTER / ARG_HELP / ARG_INVALID.
 ; Both '/' and '-' are accepted. Only one standalone switch is valid.
 ; ----------------------------------------------------------------------
 ParseCommand proc near
@@ -1058,6 +1698,7 @@ ParseCommand proc near
         push si
 
         xor bx,bx
+        xor dx,dx                    ; DL=first letter, DH='S' only for /AS
         mov bl,byte ptr cs:[80h]
         mov si,81h
 
@@ -1086,8 +1727,29 @@ ParseLetter:
         jz ParseInvalid
 
         mov al,byte ptr cs:[si]
+        cmp al,'?'
+        je ParseFirstReady
         and al,0DFh
+ParseFirstReady:
         mov dl,al
+        inc si
+        dec bx
+
+        ; Exact-match safeguard: /AS is recognized only as the two-letter
+        ; switch. /A remains valid only when followed by whitespace/end.
+        cmp dl,'A'
+        jne ParseTail
+        cmp bx,0
+        je ParseClassify
+        mov al,byte ptr cs:[si]
+        cmp al,' '
+        je ParseTail
+        cmp al,9
+        je ParseTail
+        and al,0DFh
+        cmp al,'S'
+        jne ParseInvalid
+        mov dh,'S'
         inc si
         dec bx
 
@@ -1112,11 +1774,23 @@ ParseClassify:
         cmp dl,'E'
         je ParseEnable
         cmp dl,'A'
-        je ParseAspect
+        je ParseAspectClass
         cmp dl,'C'
         je ParseCenter
+        cmp dl,'S'
+        je ParseSharpOnly
+        cmp dl,'?'
+        je ParseHelp
         jmp ParseInvalid
 
+ParseAspectClass:
+        cmp dh,'S'
+        je ParseAspectSharp
+        mov al,ARG_ASPECT
+        jmp ParseDone
+ParseAspectSharp:
+        mov al,ARG_ASPECT_SHARP
+        jmp ParseDone
 ParseUninstall:
         mov al,ARG_UNINSTALL
         jmp ParseDone
@@ -1126,11 +1800,14 @@ ParseDisable:
 ParseEnable:
         mov al,ARG_ENABLE
         jmp ParseDone
-ParseAspect:
-        mov al,ARG_ASPECT
-        jmp ParseDone
 ParseCenter:
         mov al,ARG_CENTER
+        jmp ParseDone
+ParseSharpOnly:
+        mov al,ARG_SHARP_ONLY
+        jmp ParseDone
+ParseHelp:
+        mov al,ARG_HELP
         jmp ParseDone
 ParseDefault:
         mov al,ARG_DEFAULT
@@ -1430,7 +2107,7 @@ DetectNeedsCorrection:
         mov word ptr es:[AspectWidth],ax
         mov ax,word ptr es:[NativeHeight]
         mov word ptr es:[AspectHeight],ax
-        jmp short DetectCenter
+        jmp DetectCenter
 
 DetectFitByWidth:
         mov ax,word ptr es:[NativeWidth]
@@ -1465,7 +2142,7 @@ DetectCenter:
         mov dword ptr es:[AspectSize],eax
 
         mov byte ptr es:[DetectStatus],0
-        jmp short DetectPmLeave
+        jmp DetectPmLeave
 
 DetectPmFail:
         mov byte ptr es:[DetectStatus],1
@@ -1597,7 +2274,7 @@ PrintDec16 proc near
         jne PDConvert
         mov dl,'0'
         call PutCh
-        jmp short PDDone
+        jmp PDDone
 
 PDConvert:
         xor dx,dx
@@ -1660,7 +2337,7 @@ PrintNibble proc near
         cmp al,9
         jbe NibbleDigit
         add al,'A'-10
-        jmp short NibbleOut
+        jmp NibbleOut
 NibbleDigit:
         add al,'0'
 NibbleOut:
@@ -1780,11 +2457,23 @@ PrintPolicyResult proc near
 PrintPolicyNormal:
         cmp byte ptr [StartupCommand],ARG_CENTER
         je PrintPolicyCenter
+        cmp byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        je PrintPolicySharp
+        cmp byte ptr [StartupCommand],ARG_SHARP_ONLY
+        je PrintPolicySharpOnly
         mov dx,offset MsgModeAspect
         call PrintZ
         ret
 PrintPolicyCenter:
         mov dx,offset MsgModeCenter
+        call PrintZ
+        ret
+PrintPolicySharp:
+        mov dx,offset MsgModeSharp
+        call PrintZ
+        ret
+PrintPolicySharpOnly:
+        mov dx,offset MsgModeSharpOnly
         call PrintZ
         ret
 PrintWriteFailed3:
@@ -1828,6 +2517,10 @@ MsgAlready43:
         db 'ASPECT: already 4:3; not installed.',13,10,0
 MsgInstalledAspect:
         db 'ASPECT: installed (aspect mode).',13,10,0
+MsgInstalledSharp:
+        db 'ASPECT: installed (sharp aspect mode).',13,10,0
+MsgInstalledSharpOnly:
+        db 'ASPECT: installed (sharp filter only; geometry unchanged).',13,10,0
 MsgInstalledCenter:
         db 'ASPECT: installed (centered mode).',13,10,0
 MsgGeometryFail:
@@ -1868,10 +2561,19 @@ MsgControlFail:
         db 'ERROR: ASPECT resident control protocol failed.',13,10,0
 MsgModeAspect:
         db 'ASPECT: aspect mode.',13,10,0
+MsgModeSharp:
+        db 'ASPECT: FIR-91 sharp aspect mode.',13,10,0
+MsgModeSharpOnly:
+        db 'ASPECT: FIR-91 sharp filter only (geometry unchanged).',13,10,0
 MsgModeCenter:
         db 'ASPECT: centered mode.',13,10,0
 MsgUsage:
-        db 'Usage: ASPECT [/A|/C|/U|/D|/E]',13,10,0
+        db 'Usage: ASPECT [/A|/AS|/S|/C|/U|/D|/E|/?]',13,10,0
+MsgHelp:
+        db '/A  aspect, Medium3x3   /AS aspect + FIR-91 sharp',13,10
+        db '/S  FIR-91 sharp only    /C  pixel-perfect center',13,10
+        db '/D  disable             /E  re-enable selected mode',13,10
+        db '/U  disable + unload',13,10,0
 MsgNotInstalled:
         db 'ASPECT: not installed.',13,10,0
 MsgUnsafeUnload:

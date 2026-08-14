@@ -1,9 +1,11 @@
 ; ASPECTD.ASM
-; T430LCD 2.3 - ASPECTD
+; T430LCD 2.3 /AS+/S FIR-91 optimized test - ASPECTD
 ; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
 ; Resident DPMI aspect-ratio / pixel-perfect centered display corrector.
 ;
-; Final hardware-verified DPMI counterpart of ASPECT.
+; /AS uses the hardware-verified Ivy Bridge programmable-filter mechanism with
+; the selected FIR-91 kernel while preserving /A and /C geometry. /S applies only that
+; filter and keeps the current fitter geometry unchanged.
 ;
 ; Target environment:
 ;   JEMMEX/JEMM386 active
@@ -12,11 +14,14 @@
 ;
 ; Commands:
 ;   ASPECTD        install with aspect-ratio correction, or show state
-;   ASPECTD /A     install/select aspect-ratio correction
+;   ASPECTD /A     install/select aspect-ratio correction (Medium 3x3)
+;   ASPECTD /AS    install/select aspect-ratio correction + FIR-91 sharp filter
+;   ASPECTD /S     install/select FIR-91 sharp filter only; keep current geometry
 ;   ASPECTD /C     install/select pixel-perfect centered mode
 ;   ASPECTD /U     deactivate correction (resident DPMI client stays loaded)
 ;   ASPECTD /D     same as /U
 ;   ASPECTD /E     re-enable the selected policy
+;   ASPECTD /?     show a short command summary
 ;
 ; /U deliberately means "deactivate" rather than physical unload. HDPMI32
 ; does not provide a documented safe way to destroy this resident client
@@ -28,8 +33,10 @@
 ;   - calls original BIOS first
 ;   - applies the selected policy to successful VBE modes, including native
 ;   - corrects only when BIOS restores installation PF_A_SIZE
-;   - writes ONLY PF_A_POS followed by PF_A_SIZE
-;   - verifies both writes
+;   - /A and /C retain the existing PF_A_POS -> PF_A_SIZE write path
+;   - /AS additionally programs PF0 coefficients and selects filter 00b
+;   - /S uses the same filter and rewrites unchanged SIZE only to latch it
+;   - verifies all sharp coefficient and fitter writes
 ;   - disables future writes after any verification failure
 ;
 ; Build from TOOLS\ASPECT\ASPECTD:
@@ -46,11 +53,26 @@ include T430LCD.INC
 ; ASPECTD maps the 4 KiB MMIO page containing the shared fitter registers.
 ; The register addresses themselves come from INCL\REGISTRS.INC.
 PF_PAGE_OFFSET      equ 068000h
-PF_A_POS_PAGE       equ (PF_A_POS_OFFSET-PF_PAGE_OFFSET)
-PF_A_SIZE_PAGE      equ (PF_A_SIZE_OFFSET-PF_PAGE_OFFSET)
+PF_A_POS_PAGE          equ (PF_A_POS_OFFSET-PF_PAGE_OFFSET)
+PF_A_SIZE_PAGE         equ (PF_A_SIZE_OFFSET-PF_PAGE_OFFSET)
+PF_A_CTL_PAGE          equ (PF_A_CTL_OFFSET-PF_PAGE_OFFSET)
+PF_A_HCOEF_INDEX_PAGE  equ (PF_A_HCOEF_INDEX_OFFSET-PF_PAGE_OFFSET)
+PF_A_HCOEF_DATA_PAGE   equ (PF_A_HCOEF_DATA_OFFSET-PF_PAGE_OFFSET)
+PF_A_VCOEF_INDEX_PAGE  equ (PF_A_VCOEF_INDEX_OFFSET-PF_PAGE_OFFSET)
+PF_A_VCOEF_DATA_PAGE   equ (PF_A_VCOEF_DATA_OFFSET-PF_PAGE_OFFSET)
 PIPE_PAGE_OFFSET    equ 060000h
 PIPE_A_SRC_PAGE     equ 001Ch
 MAP_SIZE            equ 1000h
+
+H_DWORDS           equ 120
+V_DWORDS           equ 86
+H_LAST_INDEX       equ 077h
+V_LAST_INDEX       equ 055h
+INDEX_MASK         equ 007Fh
+AUTO_INC_BIT       equ 8000h
+FILTER_MASK        equ 01800000h
+FILTER_CLEAR       equ 0FE7FFFFFh
+FILTER_MEDIUM      equ 00800000h
 
 ; Plain ASPECT uses FEC0/FEC1.
 MUX_PRESENT          equ 0FEC2h
@@ -71,6 +93,8 @@ STATE_WRITE_FAILED   equ 02h
 ; Display policies.
 POLICY_ASPECT        equ 00h
 POLICY_CENTER        equ 01h
+POLICY_ASPECT_SHARP  equ 02h
+POLICY_SHARP_ONLY    equ 03h
 
 ; Resident callback commands.
 CMD_MODE             equ 00h
@@ -78,6 +102,8 @@ CMD_DISABLE          equ 01h
 CMD_ENABLE           equ 02h
 CMD_ASPECT           equ 03h
 CMD_CENTER           equ 04h
+CMD_ASPECT_SHARP     equ 05h
+CMD_SHARP_ONLY       equ 06h
 
 ; Control result codes returned in BL by MUX_CONTROL.
 CTL_DISABLED_RESTORED equ 01h
@@ -100,6 +126,9 @@ ARG_DISABLE           equ 01h
 ARG_ENABLE            equ 02h
 ARG_ASPECT            equ 03h
 ARG_CENTER            equ 04h
+ARG_ASPECT_SHARP      equ 05h
+ARG_SHARP_ONLY         equ 06h
+ARG_HELP               equ 07h
 ARG_INVALID           equ 0FFh
 
 ; DPMI real-mode register structure offsets.
@@ -173,6 +202,10 @@ MuxControl:
         cmp     bl,CMD_ASPECT
         je      MuxControlValid
         cmp     bl,CMD_CENTER
+        je      MuxControlValid
+        cmp     bl,CMD_ASPECT_SHARP
+        je      MuxControlValid
+        cmp     bl,CMD_SHARP_ONLY
         je      MuxControlValid
 
         mov     ax,MUX_CONTROL_REPLY
@@ -284,6 +317,10 @@ CallbackProc:
         je      CallbackSelectAspect
         cmp     al,CMD_CENTER
         je      CallbackSelectCenter
+        cmp     al,CMD_ASPECT_SHARP
+        je      CallbackSelectSharp
+        cmp     al,CMD_SHARP_ONLY
+        je      CallbackSelectSharpOnly
 
 ; Normal mode-change correction.
 CallbackMode:
@@ -324,6 +361,9 @@ CallbackDisableActive:
         ; Disable first, so no future mode change can write while deactivated.
         mov     byte ptr gs:[CorrectionState],STATE_USER_DISABLED
 
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        je      CallbackDisableSharpOnly
+
         ; Restore the installation fitter state only when the CURRENT state is
         ; exactly ASPECTD's own applied state. If an external path or BIOS
         ; has changed it, leave that state untouched.
@@ -338,6 +378,13 @@ CallbackDisableActive:
         call    CallbackRestoreOriginal
         jnc     CallbackDisableRestored
 
+        mov     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        mov     byte ptr gs:[ControlResult],CTL_WRITE_FAILED
+        jmp     CallbackReturn
+
+CallbackDisableSharpOnly:
+        call    CallbackRestoreOriginal
+        jnc     CallbackDisableRestored
         mov     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
         mov     byte ptr gs:[ControlResult],CTL_WRITE_FAILED
         jmp     CallbackReturn
@@ -362,10 +409,15 @@ CallbackEnable:
         ; matches the installation fixed raster, also apply immediately.
         mov     byte ptr gs:[CorrectionState],STATE_ENABLED
 
+        ; /S owns no geometry, so /E can safely reapply it immediately.
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        je      CallbackEnableApply
+
         mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
         cmp     eax,dword ptr gs:[OriginalSize]
         jne     CallbackEnablePending
 
+CallbackEnableApply:
         call    CallbackPrepareTarget
         jc      CallbackEnablePending
         call    CallbackApplyTarget
@@ -392,7 +444,7 @@ CallbackEnableLocked:
         mov     byte ptr gs:[ControlResult],CTL_LOCKED
         jmp     CallbackReturn
 
-; /A or /C - select policy. Immediate application is allowed only when the
+; /A, /AS, /S or /C - select policy. Immediate application is allowed only when the
 ; current fitter is the original fixed raster or exactly ASPECTD's own last
 ; applied state. Otherwise the new policy is remembered for a later mode set.
 ; Keep /A and /C as explicit entry paths so runtime aspect selection cannot be
@@ -401,16 +453,30 @@ CallbackSelectAspect:
         cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
         je      CallbackSelectLocked
         mov     byte ptr gs:[CurrentPolicy],POLICY_ASPECT
-        jmp     short CallbackSelectState
+        jmp     CallbackSelectState
 
 CallbackSelectCenter:
         cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
         je      CallbackSelectLocked
         mov     byte ptr gs:[CurrentPolicy],POLICY_CENTER
+        jmp     CallbackSelectState
+
+CallbackSelectSharp:
+        cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        je      CallbackSelectLocked
+        mov     byte ptr gs:[CurrentPolicy],POLICY_ASPECT_SHARP
+        jmp     CallbackSelectState
+
+CallbackSelectSharpOnly:
+        cmp     byte ptr gs:[CorrectionState],STATE_WRITE_FAILED
+        je      CallbackSelectLocked
+        mov     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
 
 CallbackSelectState:
         cmp     byte ptr gs:[CorrectionState],STATE_ENABLED
         jne     CallbackSelectDisabled
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        je      CallbackSelectApply
 
         mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
         cmp     eax,dword ptr gs:[OriginalSize]
@@ -466,6 +532,8 @@ CallbackReturn:
 ; mapped page and centers that exact source raster without fitter scaling.
 ; CF clear = valid target; CF set = source is invalid/larger than native raster.
 CallbackPrepareTarget proc near
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        je      CallbackPrepareCurrent
         cmp     byte ptr gs:[CurrentPolicy],POLICY_CENTER
         je      CallbackPrepareCenter
 
@@ -474,6 +542,19 @@ CallbackPrepareTarget proc near
         mov     eax,dword ptr gs:[AspectSize]
         mov     dword ptr gs:[AppliedSize],eax
         clc
+        ret
+
+CallbackPrepareCurrent:
+        mov     eax,dword ptr fs:[PF_A_POS_PAGE]
+        mov     dword ptr gs:[AppliedPos],eax
+        mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
+        mov     dword ptr gs:[AppliedSize],eax
+        test    eax,eax
+        jz      CallbackPrepareBadNoPush
+        clc
+        ret
+CallbackPrepareBadNoPush:
+        stc
         ret
 
 CallbackPrepareCenter:
@@ -498,22 +579,23 @@ CallbackPrepareCenter:
         test    dx,dx
         jz      CallbackPrepareBad
 
-        ; The observed CGA 4-color and EGA 320x200x16 symptoms are consistent
-        ; with BIOS modes 04h/05h/0Dh reaching Pipe A as 320x400: vertical x2
-        ; already present, horizontal x2 absent. Correct only when that exact
-        ; geometry is observed; do not generalize to other 320-wide modes.
+        ; Some standard legacy modes reach Pipe A with vertical doubling
+        ; already present but the expected horizontal x2 still absent. Keep
+        ; these exceptions narrow: require both the BIOS mode number and the
+        ; exact observed source geometry before doubling the target width.
         cmp     byte ptr gs:[ModeSetKind],1
         jne     CallbackPrepareCenterSized
         mov     bl,byte ptr gs:[RequestedLegacyMode]
         and     bl,7Fh
 
-        ; BIOS 40x25 text modes 00h/01h: only when Pipe A is exactly
-        ; 360x400, restore the missing horizontal x2 and target 720x400.
+        ; 40x25 text modes 00h/01h: expected Pipe A source 360x400 -> 720x400.
         cmp     bl,00h
         je      CallbackPrepareLegacy360Check
         cmp     bl,01h
         je      CallbackPrepareLegacy360Check
 
+        ; CGA 320x200 4-color 04h/05h and EGA 320x200x16 0Dh:
+        ; observed/inferred Pipe A source 320x400 -> 640x400.
         cmp     bl,04h
         je      CallbackPrepareLegacy320Check
         cmp     bl,05h
@@ -575,6 +657,32 @@ CallbackPrepareTarget endp
 
 ; Write the prepared target and verify both registers.
 CallbackApplyTarget proc near
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        jne     CallbackApplyCheckAspectSharp
+        call    CallbackActivateSharp
+        jc      CallbackApplyBad
+        call    CallbackArmCurrentSize
+        jc      CallbackApplyBad
+        clc
+        ret
+
+CallbackApplyCheckAspectSharp:
+        ; /AS programs the proven nearest-style center-tap tables and selects
+        ; Programmed filtering. When leaving /AS, return PF0 to Medium3x3.
+        ; The PF_A_SIZE write below arms the filter change together with geometry.
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_ASPECT_SHARP
+        jne     CallbackApplyNotSharp
+        call    CallbackActivateSharp
+        jc      CallbackApplyBad
+        jmp     CallbackApplyGeometry
+
+CallbackApplyNotSharp:
+        cmp     byte ptr gs:[SharpActive],0
+        je      CallbackApplyGeometry
+        call    CallbackSelectMedium
+        jc      CallbackApplyBad
+
+CallbackApplyGeometry:
         mov     eax,dword ptr gs:[AppliedPos]
         mov     dword ptr fs:[PF_A_POS_PAGE],eax
 
@@ -597,6 +705,25 @@ CallbackApplyBad:
 CallbackApplyTarget endp
 
 CallbackRestoreOriginal proc near
+        cmp     byte ptr gs:[CurrentPolicy],POLICY_SHARP_ONLY
+        jne     CallbackRestoreOriginalNormal
+        cmp     byte ptr gs:[SharpActive],0
+        je      CallbackRestoreSharpOnlyArm
+        call    CallbackSelectMedium
+        jc      CallbackRestoreBad
+CallbackRestoreSharpOnlyArm:
+        call    CallbackArmCurrentSize
+        jc      CallbackRestoreBad
+        clc
+        ret
+
+CallbackRestoreOriginalNormal:
+        cmp     byte ptr gs:[SharpActive],0
+        je      CallbackRestoreGeometry
+        call    CallbackSelectMedium
+        jc      CallbackRestoreBad
+
+CallbackRestoreGeometry:
         mov     eax,dword ptr gs:[OriginalPos]
         mov     dword ptr fs:[PF_A_POS_PAGE],eax
 
@@ -618,6 +745,442 @@ CallbackRestoreBad:
         stc
         ret
 CallbackRestoreOriginal endp
+
+CallbackArmCurrentSize proc near
+        push    eax
+        push    edx
+        mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
+        mov     edx,eax
+        mov     dword ptr fs:[PF_A_SIZE_PAGE],eax
+        mov     eax,dword ptr fs:[PF_A_SIZE_PAGE]
+        cmp     eax,edx
+        jne     CallbackArmCurrentSizeBad
+        clc
+        jmp     CallbackArmCurrentSizeExit
+CallbackArmCurrentSizeBad:
+        stc
+CallbackArmCurrentSizeExit:
+        pop     edx
+        pop     eax
+        ret
+CallbackArmCurrentSize endp
+
+; --------------------------------------------------------------------------
+; /AS and /S programmable-filter helpers.
+; FS = mapped PF page, GS = resident data selector. FIR-91 uses one symmetric
+; phase-independent 3-tap kernel and the same documented auto-increment method
+; proven by PFNEAR2. No DPMI/DOS calls are made here.
+; --------------------------------------------------------------------------
+CallbackActivateSharp proc near
+        push    bx
+        push    dx
+        push    eax
+        push    edx
+        push    esi
+
+        mov     eax,dword ptr fs:[PF_A_HCOEF_INDEX_PAGE]
+        mov     dword ptr gs:[SharpOrigHIndex],eax
+        mov     edx,eax
+        and     edx,0FFFF7F80h
+        jnz     CallbackActivateSharpBad
+        and     ax,INDEX_MASK
+        cmp     ax,H_LAST_INDEX
+        ja      CallbackActivateSharpBad
+
+        mov     eax,dword ptr fs:[PF_A_VCOEF_INDEX_PAGE]
+        mov     dword ptr gs:[SharpOrigVIndex],eax
+        mov     edx,eax
+        and     edx,0FFFF7F80h
+        jnz     CallbackActivateSharpBad
+        and     ax,INDEX_MASK
+        cmp     ax,V_LAST_INDEX
+        ja      CallbackActivateSharpBad
+
+        call    CallbackSetHWork
+        call    CallbackWriteVerifyWorkTable
+        jc      CallbackActivateSharpBad
+
+        call    CallbackSetVWork
+        call    CallbackWriteVerifyWorkTable
+        jc      CallbackActivateSharpBad
+
+        mov     eax,dword ptr fs:[PF_A_CTL_PAGE]
+        test    eax,80000000h
+        jz      CallbackActivateSharpBad
+        mov     edx,eax
+        and     edx,60000000h
+        jnz     CallbackActivateSharpBad
+        and     eax,FILTER_CLEAR
+        mov     edx,eax
+        mov     dword ptr fs:[PF_A_CTL_PAGE],eax
+        mov     eax,dword ptr fs:[PF_A_CTL_PAGE]
+        cmp     eax,edx
+        jne     CallbackActivateSharpBad
+
+        mov     byte ptr gs:[SharpActive],1
+        clc
+        jmp     CallbackActivateSharpExit
+
+CallbackActivateSharpBad:
+        stc
+CallbackActivateSharpExit:
+        pop     esi
+        pop     edx
+        pop     eax
+        pop     dx
+        pop     bx
+        ret
+CallbackActivateSharp endp
+
+CallbackSelectMedium proc near
+        push    eax
+        push    edx
+        mov     eax,dword ptr fs:[PF_A_CTL_PAGE]
+        and     eax,FILTER_CLEAR
+        or      eax,FILTER_MEDIUM
+        mov     edx,eax
+        mov     dword ptr fs:[PF_A_CTL_PAGE],eax
+        mov     eax,dword ptr fs:[PF_A_CTL_PAGE]
+        cmp     eax,edx
+        jne     CallbackSelectMediumBad
+        mov     byte ptr gs:[SharpActive],0
+        clc
+        jmp     CallbackSelectMediumExit
+CallbackSelectMediumBad:
+        stc
+CallbackSelectMediumExit:
+        pop     edx
+        pop     eax
+        ret
+CallbackSelectMedium endp
+
+CallbackSetHWork proc near
+        mov     byte ptr gs:[WorkAxis],0
+        mov     word ptr gs:[WorkIndexOff],PF_A_HCOEF_INDEX_PAGE
+        mov     word ptr gs:[WorkDataOff],PF_A_HCOEF_DATA_PAGE
+        mov     eax,dword ptr gs:[SharpOrigHIndex]
+        mov     dword ptr gs:[WorkOrigIndex],eax
+        mov     word ptr gs:[WorkCount],H_DWORDS
+        mov     word ptr gs:[WorkLast],H_LAST_INDEX
+        ret
+CallbackSetHWork endp
+
+CallbackSetVWork proc near
+        mov     byte ptr gs:[WorkAxis],1
+        mov     word ptr gs:[WorkIndexOff],PF_A_VCOEF_INDEX_PAGE
+        mov     word ptr gs:[WorkDataOff],PF_A_VCOEF_DATA_PAGE
+        mov     eax,dword ptr gs:[SharpOrigVIndex]
+        mov     dword ptr gs:[WorkOrigIndex],eax
+        mov     word ptr gs:[WorkCount],V_DWORDS
+        mov     word ptr gs:[WorkLast],V_LAST_INDEX
+        ret
+CallbackSetVWork endp
+
+CallbackPositionWorkZeroAuto proc near
+        push    bx
+        push    cx
+        push    dx
+        push    eax
+        push    edx
+        push    esi
+
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        cmp     eax,dword ptr gs:[WorkOrigIndex]
+        je      CbPWZAAtOrig
+        call    CallbackRestoreWorkIndex
+        jc      CbPWZAFail
+
+CbPWZAAtOrig:
+        mov     eax,dword ptr gs:[WorkOrigIndex]
+        and     eax,0000007Fh
+        or      eax,00008000h
+        mov     edx,eax
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     dword ptr fs:[si],eax
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        cmp     eax,edx
+        jne     CbPWZAFail
+
+        mov     bx,word ptr gs:[WorkOrigIndex]
+        and     bx,INDEX_MASK
+        or      bx,bx
+        jz      CbPWZACheckZero
+        mov     cx,word ptr gs:[WorkCount]
+        sub     cx,bx
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkDataOff]
+CbPWZARollLoop:
+        mov     eax,dword ptr fs:[si]
+        dec     cx
+        jnz     CbPWZARollLoop
+
+CbPWZACheckZero:
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        cmp     eax,00008000h
+        jne     CbPWZAFail
+        clc
+        jmp     CbPWZAExit
+CbPWZAFail:
+        stc
+CbPWZAExit:
+        pop     esi
+        pop     edx
+        pop     eax
+        pop     dx
+        pop     cx
+        pop     bx
+        ret
+CallbackPositionWorkZeroAuto endp
+
+CallbackRestoreWorkIndex proc near
+        push    bx
+        push    cx
+        push    dx
+        push    eax
+        push    edx
+        push    esi
+
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        mov     edx,eax
+        mov     eax,edx
+        and     eax,0FFFF7F80h
+        jnz     CbRWIFail
+        mov     bx,dx
+        and     bx,INDEX_MASK
+        cmp     bx,word ptr gs:[WorkLast]
+        ja      CbRWIFail
+
+        test    edx,00008000h
+        jnz     CbRWIHaveAuto
+        mov     eax,edx
+        and     eax,0000007Fh
+        or      eax,00008000h
+        mov     dword ptr fs:[si],eax
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        mov     cx,bx
+        or      cx,AUTO_INC_BIT
+        cmp     ax,cx
+        jne     CbRWIFail
+
+CbRWIHaveAuto:
+        mov     dx,bx
+        mov     bx,word ptr gs:[WorkOrigIndex]
+        and     bx,INDEX_MASK
+        mov     cx,bx
+        cmp     dx,bx
+        jbe     CbRWINoWrap
+        add     cx,word ptr gs:[WorkCount]
+CbRWINoWrap:
+        sub     cx,dx
+        jcxz    CbRWIAtTarget
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkDataOff]
+CbRWIAdvance:
+        mov     eax,dword ptr fs:[si]
+        dec     cx
+        jnz     CbRWIAdvance
+
+CbRWIAtTarget:
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        mov     edx,eax
+        and     edx,0000807Fh
+        mov     eax,dword ptr gs:[WorkOrigIndex]
+        and     eax,0000007Fh
+        or      eax,00008000h
+        cmp     edx,eax
+        jne     CbRWIFail
+
+        mov     eax,dword ptr gs:[WorkOrigIndex]
+        and     eax,0000807Fh
+        mov     edx,eax
+        mov     dword ptr fs:[si],eax
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        cmp     eax,edx
+        jne     CbRWIFail
+        clc
+        jmp     CbRWIExit
+CbRWIFail:
+        stc
+CbRWIExit:
+        pop     esi
+        pop     edx
+        pop     eax
+        pop     dx
+        pop     cx
+        pop     bx
+        ret
+CallbackRestoreWorkIndex endp
+
+; Return the FIR-91 coefficient DWORD for work-table ordinal BX.
+; The resident coefficient data is reduced to two tiny two-phase patterns.
+CallbackGetExpectedDword proc near
+        push    bx
+        push    cx
+        push    dx
+        push    si
+
+        mov     ax,bx
+        cmp     byte ptr gs:[WorkAxis],0
+        jne     CbGEDVertical
+
+        cmp     ax,60
+        jb      CbGEDHSet
+        sub     ax,60
+CbGEDHSet:
+        cmp     ax,59
+        je      CbGEDHFinal
+        cmp     ax,56
+        jae     CbGEDHTail
+        xor     dx,dx
+        mov     cx,7
+        div     cx
+        mov     si,offset HFir91Pair
+        shl     dx,1
+        shl     dx,1
+        add     si,dx
+        mov     eax,dword ptr gs:[si]
+        jmp     CbGEDDone
+CbGEDHTail:
+        sub     ax,56
+        mov     si,offset HFir91Pair
+        shl     ax,1
+        shl     ax,1
+        add     si,ax
+        mov     eax,dword ptr gs:[si]
+        jmp     CbGEDDone
+CbGEDHFinal:
+        mov     eax,00003000h
+        jmp     CbGEDDone
+
+CbGEDVertical:
+        cmp     ax,43
+        jb      CbGEDVSet
+        sub     ax,43
+CbGEDVSet:
+        cmp     ax,42
+        je      CbGEDVFinal
+        cmp     ax,40
+        jae     CbGEDVTail
+        xor     dx,dx
+        mov     cx,5
+        div     cx
+        mov     si,offset VFir91Pair
+        shl     dx,1
+        shl     dx,1
+        add     si,dx
+        mov     eax,dword ptr gs:[si]
+        jmp     CbGEDDone
+CbGEDVTail:
+        sub     ax,40
+        mov     si,offset VFir91Pair
+        shl     ax,1
+        shl     ax,1
+        add     si,ax
+        mov     eax,dword ptr gs:[si]
+        jmp     CbGEDDone
+CbGEDVFinal:
+        mov     eax,00003000h
+
+CbGEDDone:
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        ret
+CallbackGetExpectedDword endp
+
+CallbackWriteVerifyWorkTable proc near
+        push    ax
+        push    bx
+        push    cx
+        push    eax
+        push    edx
+        push    esi
+
+        mov     byte ptr gs:[WorkError],0
+        call    CallbackPositionWorkZeroAuto
+        jnc     CbWVWTWrite
+        mov     byte ptr gs:[WorkError],1
+        jmp     CbWVWTRestoreIndex
+
+CbWVWTWrite:
+        xor     bx,bx
+        mov     cx,word ptr gs:[WorkCount]
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkDataOff]
+CbWVWTWriteLoop:
+        call    CallbackGetExpectedDword
+        mov     dword ptr fs:[si],eax
+        inc     bx
+        dec     cx
+        jnz     CbWVWTWriteLoop
+
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        cmp     eax,00008000h
+        je      CbWVWTVerify
+        mov     byte ptr gs:[WorkError],1
+
+CbWVWTVerify:
+        xor     bx,bx
+        mov     cx,word ptr gs:[WorkCount]
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkDataOff]
+CbWVWTVerifyLoop:
+        mov     eax,dword ptr fs:[si]
+        mov     edx,eax
+        call    CallbackGetExpectedDword
+        cmp     edx,eax
+        je      CbWVWTVerifyMatch
+        mov     byte ptr gs:[WorkError],1
+CbWVWTVerifyMatch:
+        inc     bx
+        dec     cx
+        jnz     CbWVWTVerifyLoop
+
+        xor     esi,esi
+        mov     si,word ptr gs:[WorkIndexOff]
+        mov     eax,dword ptr fs:[si]
+        and     eax,0000807Fh
+        cmp     eax,00008000h
+        je      CbWVWTRestoreIndex
+        mov     byte ptr gs:[WorkError],1
+
+CbWVWTRestoreIndex:
+        call    CallbackRestoreWorkIndex
+        jnc     CbWVWTResult
+        mov     byte ptr gs:[WorkError],1
+CbWVWTResult:
+        cmp     byte ptr gs:[WorkError],0
+        jne     CbWVWTFail
+        clc
+        jmp     CbWVWTExit
+CbWVWTFail:
+        stc
+CbWVWTExit:
+        pop     esi
+        pop     edx
+        pop     eax
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+CallbackWriteVerifyWorkTable endp
 
 ; --------------------------------------------------------------------------
 ; Resident data.
@@ -653,6 +1216,24 @@ ResidentInfo label byte
 CorrectionState     db STATE_ENABLED
 CurrentPolicy       db POLICY_ASPECT
 ResidentParas       dw 0
+SharpActive         db 0
+SharpOrigHIndex     dd 0
+SharpOrigVIndex     dd 0
+WorkIndexOff        dw 0
+WorkDataOff         dw 0
+WorkOrigIndex       dd 0
+WorkCount           dw 0
+WorkLast            dw 0
+WorkAxis            db 0
+WorkError           db 0
+
+; FIR-91: 4.4921875% / 91.015625% / 4.4921875%.
+; Same kernel for all 17 phases and both coefficient sets.
+HFir91Pair:
+        dd 30003000h,1E9032E0h,300032E0h,30003000h
+        dd 32E03000h,32E01E90h,30003000h
+VFir91Pair:
+        dd 32E03000h,32E01E90h,30003000h,1E9032E0h,300032E0h
 
 ; DPMI callback register image must remain valid for callback lifetime.
 CallbackRmcs        db RM_STRUCT_SIZE dup (0)
@@ -694,19 +1275,26 @@ InstallerStart:
         int     21h
 
 CommandParsed:
+        cmp     byte ptr [StartupCommand],ARG_HELP
+        je      ShowHelp
+
         ; Check for an already resident ASPECTD before doing any DPMI work.
         mov     ax,MUX_PRESENT
         int     2Fh
         cmp     ax,MUX_PRESENT_REPLY
         je      ResidentCommand
 
-        ; Default, /A and /C may start a new resident copy. /U, /D and /E
+        ; Default, /A, /AS and /C may start a new resident copy. /U, /D and /E
         ; require an existing resident copy.
         cmp     byte ptr [StartupCommand],ARG_DEFAULT
         je      CheckPlainAspectConflict
         cmp     byte ptr [StartupCommand],ARG_ASPECT
         je      CheckPlainAspectConflict
         cmp     byte ptr [StartupCommand],ARG_CENTER
+        je      CheckPlainAspectConflict
+        cmp     byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        je      CheckPlainAspectConflict
+        cmp     byte ptr [StartupCommand],ARG_SHARP_ONLY
         je      CheckPlainAspectConflict
 
         mov     dx,offset MsgNotResident
@@ -727,10 +1315,20 @@ ResidentCommand:
         je      SendAspect
         cmp     byte ptr [StartupCommand],ARG_CENTER
         je      SendCenter
+        cmp     byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        je      SendSharp
+        cmp     byte ptr [StartupCommand],ARG_SHARP_ONLY
+        je      SendSharpOnly
 
         mov     dx,offset MsgUsage
         call    PrintZ
         mov     ax,4C01h
+        int     21h
+
+ShowHelp:
+        mov     dx,offset MsgHelp
+        call    PrintZ
+        mov     ax,4C00h
         int     21h
 
 SendDisable:
@@ -775,6 +1373,26 @@ SendCenter:
         mov     ax,4C00h
         int     21h
 
+SendSharp:
+        mov     ax,MUX_CONTROL
+        mov     bl,CMD_ASPECT_SHARP
+        int     2Fh
+        cmp     ax,MUX_CONTROL_REPLY
+        jne     ControlProtocolFail
+        call    PrintPolicyResult
+        mov     ax,4C00h
+        int     21h
+
+SendSharpOnly:
+        mov     ax,MUX_CONTROL
+        mov     bl,CMD_SHARP_ONLY
+        int     2Fh
+        cmp     ax,MUX_CONTROL_REPLY
+        jne     ControlProtocolFail
+        call    PrintPolicyResult
+        mov     ax,4C00h
+        int     21h
+
 ShowResidentState:
         call    PrintResidentState
         mov     ax,4C00h
@@ -801,8 +1419,18 @@ CheckPlainAspectConflict:
 BeginInstall:
         mov     byte ptr [CurrentPolicy],POLICY_ASPECT
         cmp     byte ptr [StartupCommand],ARG_CENTER
-        jne     BeginInstallPolicySet
+        jne     BeginInstallCheckSharp
         mov     byte ptr [CurrentPolicy],POLICY_CENTER
+        jmp     BeginInstallPolicySet
+BeginInstallCheckSharp:
+        cmp     byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        jne     BeginInstallCheckSharpOnly
+        mov     byte ptr [CurrentPolicy],POLICY_ASPECT_SHARP
+        jmp     BeginInstallPolicySet
+BeginInstallCheckSharpOnly:
+        cmp     byte ptr [StartupCommand],ARG_SHARP_ONLY
+        jne     BeginInstallPolicySet
+        mov     byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
 BeginInstallPolicySet:
         ; Intel graphics BAR0, PCI 00:02.0 config offset 10h.
         mov     di,10h
@@ -955,6 +1583,8 @@ BeginInstallPolicySet:
 
         cmp     byte ptr [CurrentPolicy],POLICY_CENTER
         je      GeometryNeedsInstall
+        cmp     byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
+        je      GeometryNeedsInstall
         cmp     byte ptr [CorrectionNeeded],0
         jne     GeometryNeedsInstall
 
@@ -1068,10 +1698,20 @@ GeometryNeedsInstall:
 
         cmp     byte ptr [CurrentPolicy],POLICY_CENTER
         je      InstallPrintCenter
+        cmp     byte ptr [CurrentPolicy],POLICY_ASPECT_SHARP
+        je      InstallPrintSharp
+        cmp     byte ptr [CurrentPolicy],POLICY_SHARP_ONLY
+        je      InstallPrintSharpOnly
         mov     dx,offset MsgInstalledAspect
-        jmp     short InstallPrintDone
+        jmp     InstallPrintDone
 InstallPrintCenter:
         mov     dx,offset MsgInstalledCenter
+        jmp     InstallPrintDone
+InstallPrintSharp:
+        mov     dx,offset MsgInstalledSharp
+        jmp     InstallPrintDone
+InstallPrintSharpOnly:
+        mov     dx,offset MsgInstalledSharpOnly
 InstallPrintDone:
         call    PrintZ
 
@@ -1236,6 +1876,15 @@ RestoreOriginalFitter proc near
         mov     ax,word ptr [MmioSelector]
         mov     fs,ax
 
+        cmp     byte ptr [SharpActive],0
+        je      RestoreOriginalGeometry
+        mov     eax,dword ptr fs:[PF_A_CTL_PAGE]
+        and     eax,FILTER_CLEAR
+        or      eax,FILTER_MEDIUM
+        mov     dword ptr fs:[PF_A_CTL_PAGE],eax
+        mov     byte ptr [SharpActive],0
+
+RestoreOriginalGeometry:
         mov     eax,dword ptr [OriginalPos]
         mov     dword ptr fs:[PF_A_POS_PAGE],eax
 
@@ -1295,11 +1944,23 @@ PrintStateMemory:
         call    PrintZ
         cmp     byte ptr [StatusPolicy],POLICY_CENTER
         je      PrintStateCenter
+        cmp     byte ptr [StatusPolicy],POLICY_ASPECT_SHARP
+        je      PrintStateSharp
+        cmp     byte ptr [StatusPolicy],POLICY_SHARP_ONLY
+        je      PrintStateSharpOnly
         mov     dx,offset MsgPolicyAspect
         call    PrintZ
-        jmp     short PrintStatePolicyDone
+        jmp     PrintStatePolicyDone
 PrintStateCenter:
         mov     dx,offset MsgPolicyCenter
+        call    PrintZ
+        jmp     PrintStatePolicyDone
+PrintStateSharp:
+        mov     dx,offset MsgPolicySharp
+        call    PrintZ
+        jmp     PrintStatePolicyDone
+PrintStateSharpOnly:
+        mov     dx,offset MsgPolicySharpOnly
         call    PrintZ
 PrintStatePolicyDone:
         mov     dx,offset MsgResidentMemory
@@ -1439,11 +2100,23 @@ PrintPolicyResult proc near
 PrintPolicyNormal:
         cmp     byte ptr [StartupCommand],ARG_CENTER
         je      PrintPolicyCenterOut
+        cmp     byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        je      PrintPolicySharpOut
+        cmp     byte ptr [StartupCommand],ARG_SHARP_ONLY
+        je      PrintPolicySharpOnlyOut
         mov     dx,offset MsgModeAspect
         call    PrintZ
         ret
 PrintPolicyCenterOut:
         mov     dx,offset MsgModeCenter
+        call    PrintZ
+        ret
+PrintPolicySharpOut:
+        mov     dx,offset MsgModeSharp
+        call    PrintZ
+        ret
+PrintPolicySharpOnlyOut:
+        mov     dx,offset MsgModeSharpOnly
         call    PrintZ
         ret
 PrintPolicyWriteFail:
@@ -1462,33 +2135,33 @@ PrintPolicyResult endp
 
 ; --------------------------------------------------------------------------
 ; Command parser.
-; AL = ARG_DEFAULT / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_CENTER / ARG_INVALID.
+; AL = ARG_DEFAULT / ARG_DISABLE / ARG_ENABLE / ARG_ASPECT / ARG_ASPECT_SHARP / ARG_SHARP_ONLY / ARG_CENTER / ARG_HELP / ARG_INVALID.
 ; --------------------------------------------------------------------------
 
 ParseCommand proc near
         push    bx
+        push    dx
         push    si
 
         xor     bx,bx
+        xor     dx,dx                    ; DL=first letter, DH='S' only for /AS
         mov     bl,byte ptr cs:[80h]
-        or      bx,bx
-        jz      ParseDefault
-
         mov     si,81h
 
-ParseSkipSpaces:
+ParseSkip:
         cmp     bx,0
         je      ParseDefault
-
         mov     al,byte ptr cs:[si]
         cmp     al,' '
-        jne     ParseSlash
-
+        je      ParseSkipOne
+        cmp     al,9
+        jne     ParsePrefix
+ParseSkipOne:
         inc     si
         dec     bx
-        jmp     ParseSkipSpaces
+        jmp     ParseSkip
 
-ParseSlash:
+ParsePrefix:
         cmp     al,'/'
         je      ParseLetter
         cmp     al,'-'
@@ -1500,45 +2173,93 @@ ParseLetter:
         jz      ParseInvalid
 
         mov     al,byte ptr cs:[si]
+        cmp     al,'?'
+        je      ParseFirstReady
         and     al,0DFh
+ParseFirstReady:
+        mov     dl,al
+        inc     si
+        dec     bx
 
-        cmp     al,'U'
+        ; Exact-match safeguard: /AS is the two-letter switch; /A is accepted
+        ; only when the A is followed by whitespace or end of command tail.
+        cmp     dl,'A'
+        jne     ParseTail
+        cmp     bx,0
+        je      ParseClassify
+        mov     al,byte ptr cs:[si]
+        cmp     al,' '
+        je      ParseTail
+        cmp     al,9
+        je      ParseTail
+        and     al,0DFh
+        cmp     al,'S'
+        jne     ParseInvalid
+        mov     dh,'S'
+        inc     si
+        dec     bx
+
+ParseTail:
+        cmp     bx,0
+        je      ParseClassify
+        mov     al,byte ptr cs:[si]
+        cmp     al,' '
+        je      ParseTailOne
+        cmp     al,9
+        jne     ParseInvalid
+ParseTailOne:
+        inc     si
+        dec     bx
+        jmp     ParseTail
+
+ParseClassify:
+        cmp     dl,'U'
         je      ParseDisable
-        cmp     al,'D'
+        cmp     dl,'D'
         je      ParseDisable
-        cmp     al,'E'
+        cmp     dl,'E'
         je      ParseEnable
-        cmp     al,'A'
-        je      ParseAspect
-        cmp     al,'C'
+        cmp     dl,'A'
+        je      ParseAspectClass
+        cmp     dl,'C'
         je      ParseCenter
+        cmp     dl,'S'
+        je      ParseSharpOnly
+        cmp     dl,'?'
+        je      ParseHelp
         jmp     ParseInvalid
 
+ParseAspectClass:
+        cmp     dh,'S'
+        je      ParseAspectSharp
+        mov     al,ARG_ASPECT
+        jmp     ParseDone
+ParseAspectSharp:
+        mov     al,ARG_ASPECT_SHARP
+        jmp     ParseDone
 ParseDisable:
         mov     al,ARG_DISABLE
         jmp     ParseDone
-
 ParseEnable:
         mov     al,ARG_ENABLE
         jmp     ParseDone
-
-ParseAspect:
-        mov     al,ARG_ASPECT
-        jmp     ParseDone
-
 ParseCenter:
         mov     al,ARG_CENTER
         jmp     ParseDone
-
+ParseSharpOnly:
+        mov     al,ARG_SHARP_ONLY
+        jmp     ParseDone
+ParseHelp:
+        mov     al,ARG_HELP
+        jmp     ParseDone
 ParseDefault:
         mov     al,ARG_DEFAULT
         jmp     ParseDone
-
 ParseInvalid:
         mov     al,ARG_INVALID
-
 ParseDone:
         pop     si
+        pop     dx
         pop     bx
         ret
 ParseCommand endp
@@ -1967,6 +2688,10 @@ MsgAt:
         db ' at ',0
 MsgInstalledAspect:
         db 'ASPECTD: installed (aspect mode).',13,10,0
+MsgInstalledSharp:
+        db 'ASPECTD: installed (sharp aspect mode).',13,10,0
+MsgInstalledSharpOnly:
+        db 'ASPECTD: installed (sharp filter only; geometry unchanged).',13,10,0
 MsgInstalledCenter:
         db 'ASPECTD: installed (centered mode).',13,10,0
 
@@ -1982,6 +2707,10 @@ MsgResidentPolicy:
         db 'Mode: ',0
 MsgPolicyAspect:
         db 'aspect',13,10,0
+MsgPolicySharp:
+        db 'sharp aspect',13,10,0
+MsgPolicySharpOnly:
+        db 'sharp filter only',13,10,0
 MsgPolicyCenter:
         db 'centered',13,10,0
 MsgResidentMemory:
@@ -2018,10 +2747,18 @@ MsgAlready43:
         db 'ASPECTD: already 4:3; not installed.',13,10,0
 MsgModeAspect:
         db 'ASPECTD: aspect mode.',13,10,0
+MsgModeSharp:
+        db 'ASPECTD: FIR-91 sharp aspect mode.',13,10,0
+MsgModeSharpOnly:
+        db 'ASPECTD: FIR-91 sharp filter only (geometry unchanged).',13,10,0
 MsgModeCenter:
         db 'ASPECTD: centered mode.',13,10,0
 MsgUsage:
-        db 'Usage: ASPECTD [/A|/C|/U|/D|/E]',13,10,0
+        db 'Usage: ASPECTD [/A|/AS|/S|/C|/U|/D|/E|/?]',13,10,0
+MsgHelp:
+        db '/A  aspect, Medium3x3   /AS aspect + FIR-91 sharp',13,10
+        db '/S  FIR-91 sharp only    /C  pixel-perfect center',13,10
+        db '/D,/U disable           /E  re-enable selected mode',13,10,0
 MsgControlFail:
         db 'ERROR: ASPECTD resident control protocol failed.',13,10,0
 
