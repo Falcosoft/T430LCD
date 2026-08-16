@@ -3,9 +3,10 @@
 ; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
 ; Resident DPMI aspect-ratio / pixel-perfect centered display corrector.
 ;
-; /AS uses the hardware-verified Ivy Bridge programmable-filter mechanism with
-; the selected FIR-91 kernel while preserving /A and /C geometry. /S applies only that
-; filter and keeps the current fitter geometry unchanged.
+; /AS and /S are intentionally enabled only on Ivy Bridge. /AS uses the
+; hardware-verified programmable-filter mechanism with the selected FIR-91
+; kernel while preserving /A geometry. /S applies only that filter and keeps
+; the current fitter geometry unchanged.
 ;
 ; Target environment:
 ;   JEMMEX/JEMM386 active
@@ -1278,6 +1279,21 @@ CommandParsed:
         cmp     byte ptr [StartupCommand],ARG_HELP
         je      ShowHelp
 
+        ; The FIR-91 programmable-filter path is hardware-verified only on
+        ; Ivy Bridge (CPUID family 6, model 3Ah). Reject /AS and /S here in
+        ; transient code, before resident control or any DPMI/MMIO setup.
+        cmp     byte ptr [StartupCommand],ARG_ASPECT_SHARP
+        je      CheckSharpCpu
+        cmp     byte ptr [StartupCommand],ARG_SHARP_ONLY
+        jne     CommandHardwareChecked
+CheckSharpCpu:
+        mov     eax,1
+        db 0Fh,0A2h             ; CPUID (keep source at .386p)
+        shr     eax,4              ; discard stepping; AX = extmodel/family/model
+        cmp     ax,306Ah           ; family 6, model 3Ah (Ivy Bridge client)
+        jne     SharpUnsupported
+CommandHardwareChecked:
+
         ; Check for an already resident ASPECTD before doing any DPMI work.
         mov     ax,MUX_PRESENT
         int     2Fh
@@ -1329,6 +1345,12 @@ ShowHelp:
         mov     dx,offset MsgHelp
         call    PrintZ
         mov     ax,4C00h
+        int     21h
+
+SharpUnsupported:
+        mov     dx,offset MsgSharpUnsupported
+        call    PrintZ
+        mov     ax,4C01h
         int     21h
 
 SendDisable:
@@ -2753,6 +2775,8 @@ MsgModeSharpOnly:
         db 'ASPECTD: FIR-91 sharp filter only (geometry unchanged).',13,10,0
 MsgModeCenter:
         db 'ASPECTD: centered mode.',13,10,0
+MsgSharpUnsupported:
+        db 'ASPECTD: FIR-91 /AS and /S require Ivy Bridge; command ignored.',13,10,0
 MsgUsage:
         db 'Usage: ASPECTD [/A|/AS|/S|/C|/U|/D|/E|/?]',13,10,0
 MsgHelp:

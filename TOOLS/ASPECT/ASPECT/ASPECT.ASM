@@ -38,9 +38,10 @@
 ;   - HIMEM/XMS available during installation
 ;   - do not load twice
 ;
-; /A and /C retain their existing POS/SIZE behavior. /AS and /S additionally use the
-; hardware-verified Ivy Bridge PF0 programmable-coefficient interface at
-; 680A0h/680A4h and 680B0h/680B4h and selects PF_CTRL filter 00b.
+; /A and /C retain their existing POS/SIZE behavior. /AS and /S are
+; intentionally enabled only on Ivy Bridge and additionally use the hardware-
+; verified PF0 programmable-coefficient interface at 680A0h/680A4h and
+; 680B0h/680B4h and select PF_CTRL filter 00b.
 ; PF_A_VSCALE and PF_A_HSCALE are never modified.
 
 .model tiny
@@ -1369,6 +1370,21 @@ InstallerStart:
         int 21h
 
 CommandParsed:
+        ; The FIR-91 programmable-filter path is hardware-verified only on
+        ; Ivy Bridge (CPUID family 6, model 3Ah). Reject /AS and /S here in
+        ; transient code, before any resident control or MMIO access.
+        cmp al,ARG_ASPECT_SHARP
+        je CheckSharpCpu
+        cmp al,ARG_SHARP_ONLY
+        jne CommandHardwareChecked
+CheckSharpCpu:
+        mov eax,1
+        db 0Fh,0A2h             ; CPUID (keep source at .386p)
+        shr eax,4                  ; discard stepping; AX = extmodel/family/model
+        cmp ax,306Ah               ; family 6, model 3Ah (Ivy Bridge client)
+        jne SharpUnsupported
+        mov al,byte ptr [StartupCommand] ; CPUID destroyed AL
+CommandHardwareChecked:
         cmp al,ARG_DEFAULT
         je InstallDefault
         cmp al,ARG_HELP
@@ -1392,6 +1408,12 @@ ShowHelp:
         mov dx,offset MsgHelp
         call PrintZ
         mov ax,4C00h
+        int 21h
+
+SharpUnsupported:
+        mov dx,offset MsgSharpUnsupported
+        call PrintZ
+        mov ax,4C01h
         int 21h
 
 InstallDefault:
@@ -2567,6 +2589,8 @@ MsgModeSharpOnly:
         db 'ASPECT: FIR-91 sharp filter only (geometry unchanged).',13,10,0
 MsgModeCenter:
         db 'ASPECT: centered mode.',13,10,0
+MsgSharpUnsupported:
+        db 'ASPECT: FIR-91 /AS and /S require Ivy Bridge; command ignored.',13,10,0
 MsgUsage:
         db 'Usage: ASPECT [/A|/AS|/S|/C|/U|/D|/E|/?]',13,10,0
 MsgHelp:
