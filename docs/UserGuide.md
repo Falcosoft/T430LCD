@@ -10,9 +10,11 @@ T430LCD addresses practical LCD/display problems under real DOS on physical Inte
 
 The primary development and validation platform is a physical Lenovo ThinkPad T430 with Intel HD Graphics 4000.
 
-T430LCD v2.3 gives ASPECT and ASPECTD two explicit display policies:
+T430LCD v2.4 gives ASPECT and ASPECTD four explicit display policies:
 
-- `/A` — centered 4:3 aspect-ratio correction
+- `/A` — centered 4:3 aspect-ratio correction using Intel Medium 3×3 filtering
+- `/AS` — the same centered 4:3 geometry using the FIR-91 sharp programmable filter
+- `/S` — FIR-91 sharp filtering only, preserving the current fitter geometry
 - `/C` — pixel-perfect centered mode based on the active Intel display-pipe source raster
 
 With no argument, ASPECT and ASPECTD retain the historical behavior and use `/A`.
@@ -217,7 +219,25 @@ ASPECT /A
 
 For a fixed-raster 1600×900 destination the calculated target is 1200×900 at X=200,Y=0. For 1366×768 it is 1024×768 at X=171,Y=0. A community Broadwell report confirms the same dynamic calculation on a 1920×1080 Dell Inspiron E5550 / Intel HD 5500, producing 1440×1080 at X=240,Y=0.
 
-Unlike older releases, v2.3 has no native-resolution VBE bypass. A successful native VBE mode is treated like any other compatible mode. Therefore a native 1600×900 VBE mode can be shown as 1200×900 centered when `/A` is selected.
+Like v2.3, v2.4 has no native-resolution VBE bypass. A successful native VBE mode is treated like any other compatible mode. Therefore a native 1600×900 VBE mode can be shown as 1200×900 centered when `/A` is selected.
+
+### Select sharp 4:3 aspect correction
+
+```dos
+ASPECT /AS
+```
+
+`/AS` uses the same dynamic centered 4:3 target geometry as `/A`, but programs the hardware-verified Ivy Bridge PF0 coefficient tables with the FIR-91 kernel and selects the programmable-filter mode. FIR-91 is a symmetric 3-tap kernel using approximately 4.4921875% / 91.015625% / 4.4921875% for every phase. The result is visibly sharper than the normal Intel Medium 3×3 filter while retaining the same aspect-corrected window size and position.
+
+### Select sharp filtering without changing geometry
+
+```dos
+ASPECT /S
+```
+
+`/S` programs the same FIR-91 filter but preserves the current `PF_A_POS` and `PF_A_SIZE`. This is useful when the BIOS or another display path has already chosen the desired geometry and only the scaling filter should change. The current size is rewritten unchanged only to latch the filter change.
+
+Leaving `/AS` or `/S` for `/A`, `/C`, `/D` or `/U` restores the Intel Medium 3×3 filter. Filter/coefficient writes are verified by readback; a failure safety-locks further writes.
 
 ### Select pixel-perfect centered mode
 
@@ -261,13 +281,21 @@ Hardware testing found one deliberately narrow exception to direct `PIPESRC` cen
 
 can reach Pipe A in a 320×400 form where vertical doubling is already present but the horizontal doubling needed for correct centered display is absent.
 
-For those BIOS mode numbers only, and only when `PIPESRC` decodes to exactly 320×400, `/C` changes the target to 640×400. Only the width is doubled.
+For those BIOS mode numbers only, and only when `PIPESRC` decodes to exactly 320×400, `/C` changes the target to 640×400. Only the width is doubled. The same guarded principle is used for 40×25 text modes `00h` and `01h`: if and only if Pipe A reports exactly 360×400, the target becomes 720×400.
 
 This is intentionally not a generic 320-wide rule. Other 320×200 VGA modes worked without it, and a non-standard VGA-register-compatible 320×400×256 Fractint mode also worked correctly and remains untouched. Standard 640×200 and 640×350 legacy modes likewise worked without special handling.
 
+### Short command help
+
+```dos
+ASPECT /?
+```
+
+The DPMI counterpart accepts `ASPECTD /?` and prints the corresponding short command summary.
+
 ### Runtime policy switching
 
-`/A` and `/C` can be selected while ASPECT is resident. Immediate application is allowed only when ASPECT can prove that the fitter is either:
+`/A`, `/AS`, `/S` and `/C` can be selected while ASPECT is resident. Immediate application is allowed only when ASPECT can prove that the fitter is either:
 
 - at the saved installation fixed-raster state, or
 - exactly at ASPECT's own last-applied position and size.
@@ -288,7 +316,7 @@ ASPECT /D
 ASPECT /E
 ```
 
-`/E` re-enables whichever policy (`/A` or `/C`) is currently selected. If the current fitter state is compatible, the target is applied immediately; otherwise ASPECT waits for a later compatible mode set.
+`/E` re-enables whichever policy (`/A`, `/AS`, `/S` or `/C`) is currently selected. If the current fitter state is compatible, the target is applied immediately; otherwise ASPECT waits for a later compatible mode set.
 
 ### Physical unload
 
@@ -316,7 +344,7 @@ After a watched BIOS mode change, ASPECT applies the selected policy only when t
 
 For live `/A`↔`/C` switching, ASPECT also accepts the exact last-applied state as owned state.
 
-ASPECT writes only `PF_A_POS` followed by `PF_A_SIZE`. It never rewrites `PF_A_CTL`, `PF_A_VSCALE`, or `PF_A_HSCALE`. Pipe A `PIPESRC` is read only.
+For `/A` and `/C`, ASPECT retains the established `PF_A_POS` → `PF_A_SIZE` geometry path. `/AS` and `/S` additionally program the verified PF0 coefficient tables and change only the filter-selector bits of `PF_A_CTL`; unrelated control bits are preserved. `PF_A_VSCALE` and `PF_A_HSCALE` are never modified. Pipe A `PIPESRC` is read only.
 
 ### Mode changes watched
 
@@ -336,15 +364,18 @@ Commands:
 ```dos
 ASPECTD
 ASPECTD /A
+ASPECTD /AS
+ASPECTD /S
 ASPECTD /C
 ASPECTD /D
 ASPECTD /E
 ASPECTD /U
+ASPECTD /?
 ```
 
 No argument defaults to `/A`; when already resident, the no-argument form reports resident state.
 
-`/A`, `/C`, `/D` and `/E` have the same policy semantics as ASPECT. `/A` and `/C` can be switched at runtime using the same ownership rules.
+`/A`, `/AS`, `/S`, `/C`, `/D`, `/E` and `/?` have the same policy semantics as ASPECT. The display policy can be switched at runtime using the same ownership and verification rules.
 
 For ASPECTD, `/U` and `/D` are logical deactivation commands. The DPMI client and interrupt hooks remain resident because the verified HDPMI32 environment does not provide a documented safe way to destroy this resident client context later.
 

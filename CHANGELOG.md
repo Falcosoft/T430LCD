@@ -2,6 +2,27 @@
 
 All notable changes to T430LCD are documented here.
 
+## [2.4.0] — 2026-08-16
+
+### ASPECT / ASPECTD
+
+- Added `/AS`: existing `/A` centered 4:3 geometry with the hardware-verified FIR-91 programmable sharp filter.
+- Added `/S`: FIR-91 sharp filtering while preserving the current fitter geometry.
+- Added `/?` short command help.
+- Added verified PF0 horizontal/vertical coefficient programming through `680A0h/680A4h` and `680B0h/680B4h`.
+- Selected FIR-91 as the final sharp kernel: symmetric 4.4921875% / 91.015625% / 4.4921875% for every phase.
+- Added complete readback verification for coefficient tables, index restoration, filter-selector changes and the size write used to latch the filter.
+- Restored Intel Medium 3×3 filtering automatically when leaving a sharp policy.
+- Refined the historical `PF_A_CTL` rule: arbitrary/full-register rewrites remain avoided, but v2.4 deliberately modifies only the verified filter-selector field while preserving all unrelated bits.
+- Kept `PF_A_VSCALE` and `PF_A_HSCALE` untouched.
+- Added `/C` handling for BIOS 40×25 text modes `00h`/`01h`: only when Pipe A reports exactly 360×400, the target becomes 720×400.
+- Reduced ASPECT resident memory by using unused PSP space below `0100h` as its private interrupt stack and by generating FIR table values from compact templates.
+
+### Documentation
+
+- Updated the user guide, README, design notes, register reference and hardware-test documentation for the four-policy v2.4 model.
+- Preserved historical reverse-engineering and development-history material and added the v2.4 sharp-filter work as a later development stage.
+
 ## [2.3.0] — 2026-08-12
 
 ### ASPECT / ASPECTD

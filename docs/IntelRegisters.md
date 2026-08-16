@@ -12,7 +12,7 @@ Verified BAR0 on the primary T430:
 F0000000h
 ```
 
-The project writes only a small subset of the registers listed here. In T430LCD 2.3, ASPECT/ASPECTD also read Pipe A `PIPESRC` for the `/C` pixel-perfect centered policy; no pipe register is written.
+The project writes only a small subset of the registers listed here. T430LCD 2.4 also uses the verified PF0 programmable coefficient interface for `/AS` and `/S`, while Pipe A `PIPESRC` remains read only for `/C`. No pipe register is written.
 
 ## 2. PCI configuration
 
@@ -196,6 +196,10 @@ The active path used the CPU panel fitter A instead.
 | `68080h` | PF_A_CTL |
 | `68084h` | PF_A_VSCALE |
 | `68090h` | PF_A_HSCALE |
+| `680A0h` | PF_A_HCOEF_INDEX |
+| `680A4h` | PF_A_HCOEF_DATA |
+| `680B0h` | PF_A_VCOEF_INDEX |
+| `680B4h` | PF_A_VCOEF_DATA |
 
 ### Fitter B
 
@@ -231,11 +235,13 @@ Important observed behavior:
 - fitters B and C were disabled
 - rewriting `PF_A_CTL` caused unstable full-screen restoration in one experiment
 
-Final rule:
+Historical rule from the geometry experiments:
 
 ```text
-Do not write PF_A_CTL.
+Do not blindly rewrite PF_A_CTL.
 ```
+
+T430LCD 2.4 refines this rule: `/AS` and `/S` deliberately modify only the verified filter-selector field while preserving all unrelated bits. The programmed-filter selector is `00b`; Intel Medium 3×3 is restored with the corresponding verified selector value. Every control write is read back and verified.
 
 ### Position encoding
 
@@ -275,9 +281,8 @@ The verified sequence is:
 2. write PF_A_SIZE
 ```
 
-Do not write:
+Do not write unrelated `PF_A_CTL` bits, and do not write:
 
-- `PF_A_CTL`
 - `PF_A_VSCALE`
 - `PF_A_HSCALE`
 
@@ -404,7 +409,7 @@ PIPESRC = 027F018Fh -> 640×400
 
 The mode 13h observation was important to v2.3 `/C`: the logical 320×200 VGA mode is already represented as a 640×400 pipe source on the tested path.
 
-## 8. T430LCD 2.3 display policies
+## 8. T430LCD 2.4 display policies
 
 ### `/A` aspect policy
 
@@ -431,6 +436,21 @@ target height = width × 3 / 4
 The changing dimension is rounded down to an even value and the result is centered.
 
 The old native-resolution VBE bypass was removed in v2.3. A successful native VBE mode follows `/A` when the normal fitter safety conditions allow correction.
+
+### `/AS` and `/S` programmable sharp filter
+
+The v2.4 sharp modes use the PF0 coefficient interfaces:
+
+```text
+BAR0+680A0h  PF_A_HCOEF_INDEX
+BAR0+680A4h  PF_A_HCOEF_DATA
+BAR0+680B0h  PF_A_VCOEF_INDEX
+BAR0+680B4h  PF_A_VCOEF_DATA
+```
+
+The horizontal table contains 120 DWORDs and the vertical table 86 DWORDs. The code uses auto-increment and rollover to position and restore the hardware index state. FIR-91 applies the same symmetric 3-tap coefficients to every phase: 4.4921875% / 91.015625% / 4.4921875%.
+
+`/AS` combines these coefficients with `/A` geometry. `/S` preserves the current geometry and rewrites the unchanged size only to latch the filter change.
 
 ### `/C` pixel-perfect centered policy
 
@@ -486,12 +506,24 @@ The write preserves unrelated upper bits and is verified immediately.
 
 ### Registers written by ASPECT/ASPECTD
 
+Geometry path (`/A`, `/AS`, `/C`):
+
 ```text
 BAR0+68070h  PF_A_POS
 BAR0+68074h  PF_A_SIZE
 ```
 
-The write order is position first, size second, and both are verified by readback.
+Sharp-filter path (`/AS`, `/S`):
+
+```text
+BAR0+68080h  PF_A_CTL          filter-selector bits only
+BAR0+680A0h  PF_A_HCOEF_INDEX
+BAR0+680A4h  PF_A_HCOEF_DATA
+BAR0+680B0h  PF_A_VCOEF_INDEX
+BAR0+680B4h  PF_A_VCOEF_DATA
+```
+
+The geometry write order remains position first, size second. Sharp-mode coefficient/control writes are also verified by readback.
 
 ### Registers read by `/C`
 
@@ -501,12 +533,12 @@ BAR0+6001Ch  Pipe A PIPESRC
 
 This register is read only.
 
-### Registers intentionally not written
+### Registers/bits intentionally not written
 
 ```text
-BAR0+68080h  PF_A_CTL
-BAR0+68084h  PF_A_VSCALE
-BAR0+68090h  PF_A_HSCALE
+unrelated bits of BAR0+68080h  PF_A_CTL
+BAR0+68084h                    PF_A_VSCALE
+BAR0+68090h                    PF_A_HSCALE
 all pipe timing/source registers
 ```
 

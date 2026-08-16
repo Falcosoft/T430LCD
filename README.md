@@ -35,7 +35,7 @@ The project provides:
 ---
 
 > [!NOTE]
-> **Current release:** **v2.3**
+> **Current release:** **v2.4**
 >
 > **Implemented**
 >
@@ -44,7 +44,9 @@ The project provides:
 > - ✔ DPMI-compatible brightness control for EMM386/JEMM386 systems
 > - ✔ Automatic 4:3 aspect-ratio TSR
 > - ✔ Pixel-perfect centered `/C` policy
-> - ✔ Runtime `/A` and `/C` policy switching
+> - ✔ FIR-91 sharp filtering with `/AS` and `/S`
+> - ✔ Runtime `/A`, `/AS`, `/S` and `/C` policy switching
+> - ✔ Built-in `/?` command help
 > - ✔ DPMI-compatible ASPECTD implementation
 > - ✔ Internal LCD support
 > - ✔ External VGA support
@@ -64,10 +66,10 @@ The project provides:
 
 ### Display fitting
 
-- **ASPECT** – Plain-DOS TSR. With no argument or `/A`, applies centered 4:3 aspect correction. `/C` selects pixel-perfect centered mode. `/D` deactivates correction, `/E` re-enables the selected policy, and `/U` safely restores/deactivates before physically unloading.
-- **ASPECTD** – DPMI-compatible counterpart for systems using EMM386/JEMM386 and a resident DPMI host such as HDPMI32. It supports the same `/A`, `/C`, `/D` and `/E` policies; `/U` is a logical deactivation because the resident DPMI client cannot be safely destroyed later on the verified HDPMI32 path.
+- **ASPECT** – Plain-DOS TSR. With no argument it retains the historical `/A` behavior: centered 4:3 correction with Intel Medium 3×3 filtering. `/AS` uses the same 4:3 geometry with the hardware-verified FIR-91 sharp programmable filter, `/S` applies FIR-91 without changing the current fitter geometry, and `/C` selects pixel-perfect centered mode. `/D` deactivates, `/E` re-enables the selected policy, `/U` safely restores/deactivates before physically unloading, and `/?` shows a short command summary.
+- **ASPECTD** – DPMI-compatible counterpart for systems using EMM386/JEMM386 and a resident DPMI host such as HDPMI32. It supports the same `/A`, `/AS`, `/S`, `/C`, `/D`, `/E` and `/?` model; `/U` remains a logical deactivation because the resident DPMI client cannot be safely destroyed later on the verified HDPMI32 path.
 
-In `/C` mode the target is derived from Pipe A `PIPESRC` rather than from a hard-coded DOS resolution. This provides a true centered 1:1 source raster on the fixed internal LCD. Hardware testing also identified a narrow legacy compatibility exception for BIOS modes `04h`, `05h` and `0Dh`: when the pipe source is exactly 320×400, ASPECT/ASPECTD doubles only the horizontal target to 640×400.
+In `/C` mode the target is derived from Pipe A `PIPESRC` rather than from a hard-coded DOS resolution. This provides a true centered 1:1 source raster on the fixed internal LCD. Hardware testing also identified narrow legacy compatibility exceptions in `/C`: BIOS modes `00h`/`01h` use 360×400 → 720×400 when that exact Pipe A source is observed, while modes `04h`, `05h` and `0Dh` use 320×400 → 640×400. In both cases only the missing horizontal doubling is supplied.
 
 ### Diagnostic Utilities
 
@@ -90,7 +92,7 @@ The current project has been verified on:
 
 | Hardware | Internal LCD | Status |
 |----------|--------------|--------|
-| Lenovo ThinkPad T430 | 1600×900 | ✅ Fully verified primary platform; v2.3 `/A` and `/C` development/testing platform |
+| Lenovo ThinkPad T430 | 1600×900 | ✅ Fully verified primary platform; v2.4 `/A`, `/AS`, `/S` and `/C` development/testing platform |
 | Lenovo IdeaPad Yoga 13, Core i5-3427U / Intel HD 4000 | 1600×900 | ✅ Complete utility set confirmed working |
 | HP EliteBook Folio 9470m, Core i5-3427U / Intel HD 4000 | 1366×768 | ✅ Complete utility set confirmed working |
 | Dell Inspiron E5550 / Intel HD Graphics 5500 (Broadwell) | 1920×1080 | ✅ ASPECT confirmed; BLCSET does not work |
@@ -107,7 +109,7 @@ Confirmed `/A` internal-LCD geometry:
 - EliteBook Folio 9470m, 1366×768 → **1024×768**, centered at **X=171, Y=0**
 - Dell Inspiron E5550 / Intel HD Graphics 5500, 1920×1080 → **1440×1080**, centered at **X=240, Y=0** (ASPECT confirmed)
 
-The v2.3 `/C` implementation was additionally tested on the T430 with standard VGA, CGA/EGA legacy modes, VESA modes and non-standard VGA-register-compatible modes. The 640×200 and 640×350 CGA/EGA-family modes worked without special handling; the 320-wide legacy BIOS modes `04h`, `05h` and `0Dh` use the narrow 320×400 → 640×400 horizontal-only correction described above.
+The v2.4 `/C` implementation was additionally tested on the T430 with standard VGA, CGA/EGA legacy modes, VESA modes and non-standard VGA-register-compatible modes. The 640×200 and 640×350 CGA/EGA-family modes worked without special handling; the 320-wide legacy BIOS modes `04h`, `05h` and `0Dh` use the narrow 320×400 → 640×400 horizontal-only correction described above.
 
 ---
 
@@ -188,7 +190,7 @@ Brightness-tool compatibility:
 
 Display-correction TSR compatibility:
 
-- **ASPECT** is intended for plain DOS without EMM386/JEMM386. No argument defaults to `/A`. `/A` selects aspect correction, `/C` selects pixel-perfect centering, `/D` deactivates, `/E` re-enables the selected policy, and `/U` first performs the safe `/D` restore/deactivation path before physical unload.
+- **ASPECT** is intended for plain DOS without EMM386/JEMM386. No argument defaults to `/A`. `/A` selects 4:3 correction with Medium 3×3 filtering, `/AS` selects the same geometry with FIR-91 sharp filtering, `/S` selects FIR-91 filtering without changing geometry, `/C` selects pixel-perfect centering, `/D` deactivates, `/E` re-enables the selected policy, `/U` first performs the safe `/D` restore/deactivation path before physical unload, and `/?` prints help.
 - **ASPECTD** provides the same policy model in DPMI environments and has been verified with JEMM386/HDPMI32. `/U` remains equivalent to `/D` and does not physically remove the resident DPMI client.
 
 ---
@@ -221,6 +223,21 @@ The code did not emerge as a one-shot generation. It was refined through repeate
 ---
 
 ## Version History
+
+### v2.4
+
+Major additions since v2.3:
+
+- Added `/AS`, which keeps the proven `/A` 4:3 geometry but replaces Intel Medium 3×3 filtering with the hardware-verified FIR-91 programmable sharp filter.
+- Added `/S`, which applies the same FIR-91 filter while preserving the current fitter position and size.
+- Added `/?` short command help to ASPECT and ASPECTD.
+- Added verified programming of the Ivy Bridge PF0 horizontal and vertical coefficient tables at `680A0h/680A4h` and `680B0h/680B4h`.
+- FIR-91 uses the symmetric 4.4921875% / 91.015625% / 4.4921875% kernel for all phases.
+- Sharp-mode table writes and filter-selector changes are read back and verified; any verification failure disables further writes for safety.
+- Leaving `/AS` or `/S` restores Intel Medium 3×3 filtering while preserving unrelated `PF_A_CTL` bits.
+- Refined the old `PF_A_CTL` rule: arbitrary/full-register rewrites remain unsafe, but v2.4 deliberately changes only the verified filter-selector bits required for `/AS` and `/S`. `PF_A_VSCALE` and `PF_A_HSCALE` remain untouched.
+- Added the `/C` 40×25 text-mode compatibility fix: BIOS modes `00h`/`01h` use 360×400 → 720×400 only when that exact Pipe A source geometry is observed.
+- Reduced ASPECT resident memory by reusing the otherwise-unused PSP area below `0100h` as the private interrupt stack and by replacing large literal FIR tables with compact generated templates.
 
 ### v2.3
 

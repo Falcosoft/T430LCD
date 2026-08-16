@@ -142,6 +142,26 @@ The completed and hardware-tested state became T430LCD **v2.3**.
 
 A subsequent community report extended ASPECT validation beyond Ivy Bridge: on a Dell Inspiron E5550 with Intel HD Graphics 5500 (Broadwell) and a 1920×1080 panel, ASPECT produced the expected 1440×1080 4:3 window at X=240, Y=0. BLCSET did not work on that laptop, so this result is deliberately recorded as ASPECT-only compatibility rather than general T430LCD Broadwell support.
 
+## Phase 7 – v2.4 programmable sharp filtering
+
+After the v2.3 geometry work was complete, the investigation moved to the Ivy Bridge panel fitter's programmable coefficient path. The goal was to improve scaling sharpness without discarding the already-proven `/A` and `/C` geometry logic.
+
+Hardware experiments identified usable PF0 horizontal and vertical coefficient interfaces at `680A0h/680A4h` and `680B0h/680B4h`. The final implementation avoids direct backwards index writes and instead uses the hardware auto-increment/rollover mechanism, restores the original legal index state, and verifies every table write.
+
+Several candidate kernels were tested on real hardware. FIR-91 was selected as the final compromise, using the same symmetric 4.4921875% / 91.015625% / 4.4921875% 3-tap kernel for every phase.
+
+The command model was extended without changing the historical default:
+
+- no argument / `/A` — centered 4:3 correction with Intel Medium 3×3 filtering
+- `/AS` — the same 4:3 geometry with FIR-91 sharp filtering
+- `/S` — FIR-91 sharp filtering only, current geometry preserved
+- `/C` — pixel-perfect centered mode
+- `/?` — short command help
+
+The old lesson that blindly rewriting `PF_A_CTL` can disturb the display remains valid. v2.4 does not return to the old full-register writer: it preserves unrelated bits and modifies only the verified filter-selector field required for the sharp modes.
+
+The same development cycle also fixed 40×25 text centering in `/C`: BIOS modes `00h`/`01h` receive horizontal doubling only when Pipe A is exactly 360×400. ASPECT's resident footprint was further reduced by reusing unused PSP space as the interrupt stack and generating the FIR tables from compact templates rather than storing large literal tables.
+
 ## Future
 
 - collect detailed output-path/PFSNAP logs for the additional verified systems

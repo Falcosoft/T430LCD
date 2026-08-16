@@ -21,13 +21,15 @@ Only the active PWM duty register is written. The maximum duty cycle is detected
 
 `BLCINIT` performs the same one-time brightness operation during CONFIG.SYS processing, before a memory manager normally becomes active.
 
-## ASPECT v2.3 policy design
+## ASPECT v2.4 policy design
 
-ASPECT/ASPECTD v2.3 separate *safety/ownership* from *display policy*.
+ASPECT/ASPECTD v2.4 separate *safety/ownership* from *display policy* and add a verified programmable-filter path.
 
-The two policies are:
+The four policies are:
 
-- `/A` — centered 4:3 aspect correction
+- `/A` — centered 4:3 aspect correction with Intel Medium 3×3 filtering
+- `/AS` — the same centered 4:3 geometry with FIR-91 sharp filtering
+- `/S` — FIR-91 sharp filtering with the current geometry preserved
 - `/C` — pixel-perfect centered source raster
 
 No argument selects `/A` for backward compatibility.
@@ -100,11 +102,25 @@ This rule is both mode-specific and geometry-guarded. It does not affect other w
 
 The tested 640×200 and 640×350 CGA/EGA-family modes need no workaround.
 
+### `/AS` and `/S`: programmable FIR-91 filtering
+
+Ivy Bridge PF0 exposes programmable horizontal and vertical coefficient tables. v2.4 uses the verified index/data interfaces at `680A0h/680A4h` and `680B0h/680B4h`, with index movement performed through auto-increment/rollover rather than unsafe backwards index writes.
+
+FIR-91 is the selected compromise from the hardware-tested sharp-filter experiments. Every phase uses the same symmetric 3-tap kernel:
+
+```text
+4.4921875% / 91.015625% / 4.4921875%
+```
+
+`/AS` combines this filter with the normal `/A` 4:3 geometry. `/S` changes only the filter and leaves the current fitter geometry untouched. Coefficient tables, index restoration, filter-selector changes and the size write used to latch the filter are all verified.
+
 ## Runtime controls
 
 Both ASPECT and ASPECTD support:
 
-- `/A` select aspect policy
+- `/A` select aspect policy with Medium 3×3 filtering
+- `/AS` select aspect policy with FIR-91 sharp filtering
+- `/S` select FIR-91 sharp filtering without changing geometry
 - `/C` select centered policy
 - `/D` deactivate
 - `/E` re-enable the selected policy
@@ -166,11 +182,11 @@ Both mappings are retained regardless of the initial policy so runtime `/C` swit
 
 The DPMI path has been verified with JEMM386/HDPMI32 on the ThinkPad T430, including protected-mode DOS games with ASPECTD. DPMI was preferred over a VCPI-only design because compatibility with VSBHDA is an explicit project goal.
 
-## Why PF_A_CTL is never written
+## Refined PF_A_CTL write policy
 
-Experiments showed that rewriting `PF_A_CTL` could produce flickering or corrupted output even when writing back the same value. Stable operation required changing only `PF_A_POS` followed by `PF_A_SIZE`.
+The original panel-fitting experiments showed that blindly rewriting the complete `PF_A_CTL` value could produce flickering or corrupted output even when the numeric value appeared unchanged. That historical result remains important: **full-register or unrelated control rewrites are still avoided**.
 
-The same write policy is used by `/A` and `/C` in both ASPECT and ASPECTD. `PIPESRC` is read only; pipe timing/source registers are never modified.
+T430LCD 2.4 narrows the exception to the hardware-verified filter selector used by `/AS` and `/S`. The code reads `PF_A_CTL`, preserves every unrelated bit, changes only the filter-selection field, verifies the readback, and latches the change through `PF_A_SIZE`. `/A` and `/C` continue to use the established geometry write path. `PF_A_VSCALE` and `PF_A_HSCALE` remain untouched; `PIPESRC` remains read only.
 
 ## Additional verified hardware
 

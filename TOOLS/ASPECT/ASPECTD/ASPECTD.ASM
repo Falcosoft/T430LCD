@@ -1,5 +1,5 @@
 ; ASPECTD.ASM
-; T430LCD 2.3 /AS+/S FIR-91 optimized test - ASPECTD
+; T430LCD 2.4 - ASPECTD
 ; Primary target: Lenovo ThinkPad T430 / Intel HD Graphics 4000
 ; Resident DPMI aspect-ratio / pixel-perfect centered display corrector.
 ;

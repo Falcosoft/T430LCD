@@ -754,6 +754,35 @@ For `/C`, ASPECTD keeps its existing 4 KiB fitter mapping at `BAR0+68000h` and a
 
 Runtime `/A` and `/C` switching is explicit in the resident callback. ASPECTD `/U` remains equivalent to `/D` because the verified HDPMI32 resident-client design still has no documented safe physical-unload path.
 
+### 13.6 T430LCD 2.4 programmable-filter investigation
+
+The v2.3 work deliberately left the earlier `PF_A_CTL` warning intact because the first fitter-control experiments had shown that blindly rewriting the whole register could cause flicker or corruption. The v2.4 sharp-filter work revisited the control path much more narrowly rather than discarding that lesson.
+
+Read-only and controlled experiments identified the PF0 programmable coefficient interface used by the active Fitter A path:
+
+```text
+680A0h  horizontal coefficient index
+680A4h  horizontal coefficient data
+680B0h  vertical coefficient index
+680B4h  vertical coefficient data
+```
+
+The index registers have legal bounded ranges and an auto-increment mechanism. Direct backwards index writes were avoided. The final code advances through the table using reads/writes that exercise the hardware rollover behavior, verifies the table contents, and restores the original legal index state.
+
+Multiple sharp kernels were tested on the physical T430. FIR-91 was selected as the final compromise between the sharper and softer candidates. It uses the same symmetric three-tap kernel for every phase:
+
+```text
+4.4921875% / 91.015625% / 4.4921875%
+```
+
+Two new policies were built from this result. `/AS` retains the existing `/A` 4:3 geometry but selects the programmable FIR-91 filter. `/S` programs FIR-91 while leaving the current fitter position and size unchanged. In the latter case the unchanged `PF_A_SIZE` value is rewritten only to latch the filter change.
+
+This work refined, rather than contradicted, the earlier `PF_A_CTL` finding. Full-register rewrites remain avoided. The v2.4 code reads the current register, preserves unrelated bits, changes only the verified filter-selector field, and immediately verifies the result. Returning from a sharp policy restores the normal Intel Medium 3×3 selector. `PF_A_VSCALE` and `PF_A_HSCALE` remain untouched.
+
+The v2.4 cycle also found a separate `/C` legacy-text quirk: BIOS 40×25 text modes `00h` and `01h` can reach Pipe A as 360×400, where the expected horizontal doubling is absent. The final workaround mirrors the earlier CGA/EGA philosophy and is deliberately guarded by both mode number and exact geometry: only 360×400 is changed to 720×400.
+
+Finally, the implementation was compacted without changing the hardware model. Plain ASPECT reuses otherwise-unused resident PSP space below `0100h` as its private interrupt stack, and the large literal FIR tables were replaced with small repeated templates plus generated final coefficients.
+
 ## 14. Engineering lessons
 
 ### 14.1 Read-only diagnostics first
@@ -841,8 +870,9 @@ The project produced:
 - DPMI-compatible interactive brightness control with JEMM386/HDPMI32
 - boot-time brightness initialization
 - automatic internal-LCD 4:3 correction
-- explicit pixel-perfect centered `/C` policy in T430LCD 2.3
-- runtime `/A` and `/C` policy switching
+- explicit pixel-perfect centered `/C` policy introduced in T430LCD 2.3
+- FIR-91 sharp `/AS` and geometry-preserving `/S` policies in T430LCD 2.4
+- runtime `/A`, `/AS`, `/S` and `/C` policy switching
 - DPMI-compatible resident aspect-ratio/centered correction with JEMM386/HDPMI32
 - safe handling of external analog VGA
 - safe handling of external digital/DVI
